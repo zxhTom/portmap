@@ -261,3 +261,174 @@ Then:
 sudo systemctl daemon-reload
 sudo systemctl restart portmap
 ```
+
+---
+
+# Relay Tunnel Deployment (NAT Traversal)
+
+This setup is for the **ABC scenario**: A (internal, no public IP) → B (VPS, public IP) tunnel, C (external client) accesses A through B.
+
+## Architecture
+
+```
+Internal machine A              VPS B (public IP)           External client C
+┌──────────────┐    tunnel     ┌──────────────┐           ┌──────────┐
+│ portmap      │────outbound──→│ portmap serve │           │          │
+│ connect      │               │  --relay     │←───TCP───│ client   │
+│              │               │  port 20000  │           │          │
+│ target:8080  │               └──────────────┘           └──────────┘
+└──────────────┘
+```
+
+- **A** initiates the outbound tunnel to B (only A→B direction needs to be reachable)
+- **B** listens on public ports, forwards traffic through the tunnel to A
+- **C** connects to B's public port just like any normal service
+
+## Deploy on VPS (B)
+
+Same as the standard deployment, but with `--relay`:
+
+```bash
+# Build and install as before
+sudo cp portmap /usr/local/bin/portmap
+sudo mkdir -p /etc/portmap /var/log/portmap
+sudo chown nobody:nogroup /var/log/portmap
+```
+
+### Service file (with relay)
+
+`/etc/systemd/system/portmap.service`:
+
+```ini
+[Unit]
+Description=Portmap Relay Server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/portmap serve --relay --log-file=/var/log/portmap/portmap.log
+Restart=always
+RestartSec=5
+User=nobody
+Group=nogroup
+Environment=PORTMAP_HOME=/etc/portmap
+
+# For ports below 1024 (optional)
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Enable and start:
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now portmap
+```
+
+The relay server listens on port 7000 (default, configurable in `config.json` `relay.listen_addr`). Make sure this port is reachable from internal machine A:
+
+```bash
+sudo ufw allow 7000/tcp
+```
+
+### Add mappings on VPS
+
+```bash
+sudo -E portmap add my-app --target-host <any-ip> --target-port 8080 -g infra
+sudo -E portmap start my-app -g infra
+```
+
+Note: `--target-host` and `--target-port` here are informational (shown in list). The actual target is determined by the tunnel client on machine A.
+
+## Deploy on Internal Machine (A)
+
+The internal machine only needs the `portmap` binary — no service needed. It runs `portmap connect`.
+
+### Option 1: Simple CLI (manual)
+
+```bash
+./portmap connect --relay-addr <vps-public-ip>:7000
+```
+
+This reads mappings from the server's config and tunnels them all.
+
+### Option 2: tunnel.json (explicit)
+
+Create `~/.config/portmap/tunnel.json`:
+
+```json
+{
+  "relay_addr": "vps-public-ip:7000",
+  "tunnels": [
+    {
+      "mapping_id": "infra/my-app",
+      "target_host": "127.0.0.1",
+      "target_port": 8080
+    }
+  ]
+}
+```
+
+Then run:
+```bash
+./portmap connect
+```
+
+### Option 3: systemd service for auto-start on A
+
+`/etc/systemd/system/portmap-tunnel.service`:
+
+```ini
+[Unit]
+Description=Portmap Tunnel Client
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/portmap connect --relay-addr <vps-public-ip>:7000
+Restart=always
+RestartSec=5
+User=nobody
+Group=nogroup
+Environment=PORTMAP_HOME=/etc/portmap
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl enable --now portmap-tunnel
+```
+
+The tunnel client auto-reconnects on connection loss.
+
+## Verify
+
+On VPS (B):
+```bash
+sudo -E portmap list
+```
+
+Should show:
+```
+GROUP  NAME     STATUS     LOCAL_PORT  TARGET
+infra  my-app   connected  20000       127.0.0.1:8080
+```
+
+Status `connected` means the tunnel is active.
+
+From external client (C):
+```bash
+curl http://<vps-public-ip>:20000
+```
+
+## Firewall Summary
+
+| Machine | Port    | Direction | Purpose           |
+|---------|---------|-----------|-------------------|
+| VPS B   | 20000+  | IN        | Public mapped ports |
+| VPS B   | 7000    | IN        | Relay tunnel from A |
+| VPS B   | 9876    | LOCAL     | Management API |
+| Machine A | any   | OUT       | Outbound to B:7000 |

@@ -1,6 +1,32 @@
 # portmap
 
-TCP port mapping manager daemon. Deploy on a public-facing server to forward traffic to backend services on any reachable network.
+TCP port mapping manager daemon with relay tunnel support for NAT traversal. Deploy on a public-facing server to forward traffic, or use the relay mode to expose services from internal (NAT) machines that the server cannot reach directly.
+
+## Architecture
+
+### Direct Mode
+Server can reach the target — simple TCP proxy:
+
+```
+Client → [portmap:20000] → Target:8080
+```
+
+### Relay Mode (NAT Traversal)
+Server cannot reach the target (internal machine behind NAT). Internal machine initiates an outbound tunnel:
+
+```
+                     ┌─ portmap serve (VPS B) ─┐
+External C ──→ :20000                           │
+                     │     relay tunnel (A → B)  │
+                     │                           │
+                     └─ portmap connect (A) ─────┘
+                                    │
+                              Target:8080 (on A or A's network)
+```
+
+- **`portmap serve --relay`** runs on the VPS (B) with a public IP
+- **`portmap connect`** runs on the internal machine (A) and connects outbound to the VPS relay
+- External clients (C) access the VPS public port, traffic flows through the tunnel to A
 
 ## Quick Start
 
@@ -8,20 +34,19 @@ TCP port mapping manager daemon. Deploy on a public-facing server to forward tra
 # Build
 go build -o portmap ./cmd/portmap/
 
-# Start daemon
+# --- Direct mode ---
 ./portmap serve
-
-# Add a port mapping (listen on port 20000, forward to 10.0.0.5:8080)
 ./portmap add web --target-host 10.0.0.5 --target-port 8080 -g my-group
-
-# Start it
 ./portmap start web -g my-group
 
-# View all mappings
-./portmap list
-```
+# --- Relay mode (VPS) ---
+./portmap serve --relay
+./portmap add myapp --target-host <internal-ip> --target-port 8080 -g infra
+./portmap start myapp -g infra
 
-Now `0.0.0.0:20000` forwards to `10.0.0.5:8080`.
+# --- Relay mode (internal machine, connects to VPS) ---
+./portmap connect --relay-addr <vps-ip>:7000
+```
 
 ## Concepts
 
@@ -69,6 +94,22 @@ portmap serve [flags]
 Flags:
   --bind-addr string   Bind address for port listeners (default from config: 0.0.0.0)
   --log-file string    Log file path (default stderr only)
+  --relay              Enable relay server for tunnel clients (default port 7000)
+```
+
+### connect
+
+Connect to a portmap relay server as a tunnel client. This is used on internal machines that initiate outbound connections to the VPS.
+
+```bash
+portmap connect [flags]
+
+Flags:
+  --relay-addr string   Relay server address (e.g., vps-ip:7000)
+  --token string         Relay auth token (if server requires one)
+
+# With --relay-addr, uses server config.json mappings for tunnel info
+# Without --relay-addr, reads from tunnel.json in data directory
 ```
 
 ### add
@@ -122,6 +163,12 @@ portmap list
 ```
 
 Output columns: GROUP, NAME, STATUS, LOCAL_PORT, TARGET, STARTED
+
+Status values:
+- `running` — direct proxy is listening
+- `waiting` — relay mode: mapping started but no tunnel client connected yet
+- `connected` — relay mode: tunnel client is connected and forwarding
+- `stopped` — not running
 
 ### start / stop
 
@@ -197,6 +244,11 @@ Config files live in `$PORTMAP_HOME` (default `~/.config/portmap/`).
     "start": 20000,
     "end": 30000
   },
+  "relay": {
+    "enabled": true,
+    "listen_addr": "0.0.0.0:7000",
+    "token": ""
+  },
   "groups": [
     {
       "name": "infra",
@@ -227,8 +279,34 @@ Config files live in `$PORTMAP_HOME` (default `~/.config/portmap/`).
 
 - `bind_addr`: IP to bind listeners on. Use `0.0.0.0` to accept connections from any interface, `127.0.0.1` for local only.
 - `port_range`: Global fallback range for auto-assigned ports.
+- `relay.enabled`: Enable relay server to accept tunnel client connections.
+- `relay.listen_addr`: Address for relay server to listen on (default `0.0.0.0:7000`).
+- `relay.token`: Optional token for tunnel client authentication.
 - `groups[].port_range`: Per-group port range override. Omitted = use global.
 - `mappings[].local_port`: `0` means auto-assign from the applicable port range.
+
+### tunnel.json (client-side, used by `portmap connect`)
+
+Created automatically when using `connect --relay-addr`, or manually:
+
+```json
+{
+  "relay_addr": "vps-public-ip:7000",
+  "token": "",
+  "tunnels": [
+    {
+      "mapping_id": "web/my-service",
+      "target_host": "127.0.0.1",
+      "target_port": 8080
+    },
+    {
+      "mapping_id": "infra/ssh",
+      "target_host": "10.0.0.5",
+      "target_port": 22
+    }
+  ]
+}
+```
 
 ### state.json (daemon-managed, do not edit manually)
 

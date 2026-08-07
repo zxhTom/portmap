@@ -24,10 +24,17 @@ type Group struct {
 	Mappings  []Mapping  `json:"mappings"`
 }
 
+type RelayConfig struct {
+	Enabled     bool   `json:"enabled"`
+	ListenAddr  string `json:"listen_addr"`
+	Token       string `json:"token,omitempty"`
+}
+
 type Config struct {
-	BindAddr  string    `json:"bind_addr"`
-	PortRange PortRange `json:"port_range"`
-	Groups    []Group   `json:"groups"`
+	BindAddr  string      `json:"bind_addr"`
+	PortRange PortRange   `json:"port_range"`
+	Relay     RelayConfig `json:"relay,omitempty"`
+	Groups    []Group     `json:"groups"`
 }
 
 type MappingState struct {

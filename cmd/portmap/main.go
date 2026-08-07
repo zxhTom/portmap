@@ -15,7 +15,9 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zxhtom/portmap/internal/api"
+	"github.com/zxhtom/portmap/internal/config"
 	"github.com/zxhtom/portmap/internal/manager"
+	"github.com/zxhtom/portmap/internal/tunnel"
 )
 
 var (
@@ -23,6 +25,9 @@ var (
 	apiAddr    string
 	bindAddr   string
 	logFile    string
+	relayFlag  bool
+	relayAddr  string
+	relayToken string
 	group      string
 	localPort  int
 	targetHost string
@@ -64,7 +69,7 @@ func apiURL(path string) string {
 
 var rootCmd = &cobra.Command{
 	Use:   "portmap",
-	Short: "Port mapping manager",
+	Short: "Port mapping manager and relay tunnel",
 }
 
 var serveCmd = &cobra.Command{
@@ -74,6 +79,20 @@ var serveCmd = &cobra.Command{
 		initSlog()
 
 		dir := dataDirPath()
+
+		if relayFlag {
+			cfg, err := config.LoadConfig(dir)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			cfg.Relay.Enabled = true
+			if cfg.Relay.ListenAddr == "" {
+				cfg.Relay.ListenAddr = "0.0.0.0:7000"
+			}
+			if err := config.SaveConfig(dir, cfg); err != nil {
+				return fmt.Errorf("save config: %w", err)
+			}
+		}
 
 		mgr := manager.New(dir)
 		if err := mgr.Init(); err != nil {
@@ -85,7 +104,7 @@ var serveCmd = &cobra.Command{
 			return fmt.Errorf("api listen %s: %w", apiAddr, err)
 		}
 
-		slog.Info("portmap daemon started", "data_dir", dir, "api", apiAddr)
+		slog.Info("portmap daemon started", "data_dir", dir, "api", apiAddr, "relay", mgr.HasRelay())
 		if bindAddr != "" {
 			mgr.SetBindAddr(bindAddr)
 		}
@@ -97,6 +116,64 @@ var serveCmd = &cobra.Command{
 		slog.Info("shutting down...")
 		srv.Close()
 		mgr.Shutdown()
+		return nil
+	},
+}
+
+var connectCmd = &cobra.Command{
+	Use:   "connect",
+	Short: "Connect as a tunnel client to a portmap relay",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		initSlog()
+
+		dir := dataDirPath()
+		var tunnels []tunnel.TunnelInfo
+		var rAddr, token string
+
+		if relayAddr != "" {
+			rAddr = relayAddr
+			token = relayToken
+			cfg, err := config.LoadConfig(dir)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			for _, g := range cfg.Groups {
+				for _, mp := range g.Mappings {
+					tunnels = append(tunnels, tunnel.TunnelInfo{
+						MappingID:  g.Name + "/" + mp.Name,
+						TargetHost: mp.TargetHost,
+						TargetPort: mp.TargetPort,
+						LocalPort:  mp.LocalPort,
+					})
+				}
+			}
+		} else {
+			var err error
+			rAddr, token, tunnels, err = tunnel.LoadClientConfig(dir)
+			if err != nil {
+				return fmt.Errorf("no tunnel config and --relay-addr not set: %w\n  use --relay-addr or create %s/tunnel.json", err, dir)
+			}
+		}
+
+		if rAddr == "" {
+			return fmt.Errorf("relay address is required")
+		}
+		if len(tunnels) == 0 {
+			return fmt.Errorf("no tunnels configured")
+		}
+
+		cli := tunnel.NewClient(rAddr, token, dir)
+		if err := cli.Start(tunnels); err != nil {
+			return fmt.Errorf("connect: %w", err)
+		}
+		slog.Info("tunnel client connected", "relay", rAddr, "tunnels", len(tunnels))
+
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		<-sigCh
+
+		slog.Info("shutting down tunnel client...")
+		cli.Close()
 		return nil
 	},
 }
@@ -287,6 +364,10 @@ func main() {
 
 	serveCmd.Flags().StringVar(&bindAddr, "bind-addr", "", "Bind address for port listeners (default from config)")
 	serveCmd.Flags().StringVar(&logFile, "log-file", "", "Log file path (default stderr only)")
+	serveCmd.Flags().BoolVar(&relayFlag, "relay", false, "Enable relay server for tunnel clients")
+
+	connectCmd.Flags().StringVar(&relayAddr, "relay-addr", "", "Relay server address (e.g., vps-ip:7000)")
+	connectCmd.Flags().StringVar(&relayToken, "token", "", "Relay auth token")
 
 	addCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 	addCmd.Flags().IntVarP(&localPort, "port", "p", 0, "Local port (0=auto)")
@@ -307,6 +388,6 @@ func main() {
 	groupCmd.AddCommand(groupStartCmd)
 	groupCmd.AddCommand(groupStopCmd)
 
-	rootCmd.AddCommand(serveCmd, addCmd, updateCmd, deleteCmd, listCmd, startCmd, stopCmd, groupCmd)
+	rootCmd.AddCommand(serveCmd, connectCmd, addCmd, updateCmd, deleteCmd, listCmd, startCmd, stopCmd, groupCmd)
 	rootCmd.Execute()
 }
