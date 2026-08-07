@@ -106,148 +106,20 @@ portmap connect [flags]
 
 参数:
   --relay-addr string   Relay 服务器地址（例如 vps公网IP:7000）
-  --token string        Relay 认证令牌（当服务器需要时）
-
-# 使用 --relay-addr 时，从服务端 config.json 读取映射信息
-# 不使用 --relay-addr 时，从数据目录的 tunnel.json 读取配置
+  -u, --user string     Relay 认证用户名
+  -P, --password string Relay 认证密码
 ```
 
-### add
-
-添加端口映射。添加后默认为停止状态。
-
-```bash
-portmap add <名称> [flags]
-
-参数:
-  -g, --group string        分组名称（默认 "default"）
-  -p, --port int            本地监听端口（0=自动分配，默认 0）
-      --target-host string  目标主机（必填）
-      --target-port int     目标端口（必填）
-```
-
-示例：
-```bash
-portmap add grafana -g infra --target-host 10.0.0.10 --target-port 3000
-portmap add ssh-relay -g infra --target-host 10.0.0.11 --target-port 22 -p 2222
-```
-
-### update
-
-更新已有映射。仅修改指定字段。如果映射正在运行且目标或端口变化，会自动重启。
-
-```bash
-portmap update <名称> [flags]
-
-参数:
-  -g, --group string        分组名称（默认 "default"）
-  -p, --port int            新本地端口（0=保持当前端口不变）
-      --target-host string  新目标主机
-      --target-port int     新目标端口
-```
-
-### delete
-
-删除映射。如果正在运行会先停止。
-
-```bash
-portmap delete <名称> -g <分组>
-```
-
-### list
-
-查看所有映射及其状态。
-
-```bash
-portmap list
-```
-
-输出列：GROUP, NAME, STATUS, LOCAL_PORT, TARGET, STARTED
-
-状态说明：
-- `running` — 直连代理正在监听
-- `waiting` — Relay 模式：已启动但尚未有隧道客户端连接
-- `connected` — Relay 模式：隧道客户端已连接，正在转发
-- `stopped` — 已停止
-
-### start / stop
-
-启动或停止单条映射。
-
-```bash
-portmap start <名称> -g <分组>
-portmap stop <名称> -g <分组>
-```
-
-### group start / group stop
-
-启动或停止分组内的所有映射。
-
-```bash
-portmap group start <分组名>
-portmap group stop <分组名>
-```
-
-## API
-
-Daemon 在 `127.0.0.1:9876` 上提供 REST API：
-
-| 方法     | 路径                            | 说明            |
-|---------|---------------------------------|-----------------|
-| GET      | /api/mappings                   | 查看所有映射     |
-| POST     | /api/mappings                   | 添加映射        |
-| PUT      | /api/mappings/:name             | 更新映射        |
-| DELETE   | /api/mappings/:name?group=g     | 删除映射        |
-| POST     | /api/mappings/:name/start?group=g | 启动映射      |
-| POST     | /api/mappings/:name/stop?group=g  | 停止映射      |
-| POST     | /api/groups/:name/start         | 启动分组        |
-| POST     | /api/groups/:name/stop          | 停止分组        |
-
-### 添加映射请求
+VPS 侧在 `config.json` 中配置用户：
 
 ```json
 {
-  "group": "infra",
-  "name": "grafana",
-  "local_port": 0,
-  "target_host": "10.0.0.10",
-  "target_port": 3000
-}
-```
-
-### 查看映射响应
-
-```json
-[
-  {
-    "group": "infra",
-    "name": "grafana",
-    "local_port": 20000,
-    "target_host": "10.0.0.10",
-    "target_port": 3000,
-    "status": "running",
-    "started_at": "2026-08-07T16:00:00+08:00"
-  }
-]
-```
-
-## 配置文件
-
-配置文件位于 `$PORTMAP_HOME`（默认 `~/.config/portmap/`）。
-
-### config.json
-
-```json
-{
-  "bind_addr": "0.0.0.0",
-  "port_range": {
-    "start": 20000,
-    "end": 30000
-  },
   "relay": {
     "enabled": true,
     "listen_addr": "0.0.0.0:7000",
-    "token": ""
+    "users": [
+      {"user": "admin", "password": "mypassword"}
+    ]
   },
   "groups": [
     {
@@ -281,7 +153,7 @@ Daemon 在 `127.0.0.1:9876` 上提供 REST API：
 - `port_range`：全局自动分配端口范围。
 - `relay.enabled`：是否启用 relay 服务器，接受隧道客户端连接。
 - `relay.listen_addr`：relay 服务器监听地址（默认 `0.0.0.0:7000`）。
-- `relay.token`：可选的隧道客户端认证令牌。
+- `relay.users`：客户端认证用户列表，每项含 `user` 和 `password`。留空不认证。
 - `groups[].port_range`：分组级别的端口范围，设置后覆盖全局设置。
 - `mappings[].local_port`：`0` 表示从对应端口范围自动分配。
 
@@ -292,7 +164,8 @@ Daemon 在 `127.0.0.1:9876` 上提供 REST API：
 ```json
 {
   "relay_addr": "vps公网IP:7000",
-  "token": "",
+  "user": "admin",
+  "password": "mypassword",
   "tunnels": [
     {
       "mapping_id": "web/my-service",

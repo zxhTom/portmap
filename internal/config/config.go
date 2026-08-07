@@ -24,10 +24,16 @@ type Group struct {
 	Mappings  []Mapping  `json:"mappings"`
 }
 
+type RelayCredential struct {
+	User     string `json:"user"`
+	Password string `json:"password"`
+}
+
 type RelayConfig struct {
-	Enabled     bool   `json:"enabled"`
-	ListenAddr  string `json:"listen_addr"`
-	Token       string `json:"token,omitempty"`
+	Enabled     bool               `json:"enabled"`
+	ListenAddr  string             `json:"listen_addr"`
+	Token       string             `json:"token,omitempty"`
+	Users       []RelayCredential  `json:"users,omitempty"`
 }
 
 type Config struct {

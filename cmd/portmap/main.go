@@ -25,10 +25,11 @@ var (
 	apiAddr    string
 	bindAddr   string
 	logFile    string
-	relayFlag  bool
-	relayAddr  string
-	relayToken string
-	group      string
+	relayFlag   bool
+	relayAddr   string
+	relayUser   string
+	relayPasswd string
+	group       string
 	localPort  int
 	targetHost string
 	targetPort int
@@ -128,11 +129,12 @@ var connectCmd = &cobra.Command{
 
 		dir := dataDirPath()
 		var tunnels []tunnel.TunnelInfo
-		var rAddr, token string
+		var rAddr, user, passwd string
 
 		if relayAddr != "" {
 			rAddr = relayAddr
-			token = relayToken
+			user = relayUser
+			passwd = relayPasswd
 			cfg, err := config.LoadConfig(dir)
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)
@@ -149,7 +151,7 @@ var connectCmd = &cobra.Command{
 			}
 		} else {
 			var err error
-			rAddr, token, tunnels, err = tunnel.LoadClientConfig(dir)
+			rAddr, user, passwd, tunnels, err = tunnel.LoadClientConfig(dir)
 			if err != nil {
 				return fmt.Errorf("no tunnel config and --relay-addr not set: %w\n  use --relay-addr or create %s/tunnel.json", err, dir)
 			}
@@ -162,7 +164,7 @@ var connectCmd = &cobra.Command{
 			return fmt.Errorf("no tunnels configured")
 		}
 
-		cli := tunnel.NewClient(rAddr, token, dir)
+		cli := tunnel.NewClient(rAddr, user, passwd, dir)
 		if err := cli.Start(tunnels); err != nil {
 			return fmt.Errorf("connect: %w", err)
 		}
@@ -367,7 +369,8 @@ func main() {
 	serveCmd.Flags().BoolVar(&relayFlag, "relay", false, "Enable relay server for tunnel clients")
 
 	connectCmd.Flags().StringVar(&relayAddr, "relay-addr", "", "Relay server address (e.g., vps-ip:7000)")
-	connectCmd.Flags().StringVar(&relayToken, "token", "", "Relay auth token")
+	connectCmd.Flags().StringVarP(&relayUser, "user", "u", "", "Relay auth username")
+	connectCmd.Flags().StringVarP(&relayPasswd, "password", "P", "", "Relay auth password")
 
 	addCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 	addCmd.Flags().IntVarP(&localPort, "port", "p", 0, "Local port (0=auto)")

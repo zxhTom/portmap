@@ -51,7 +51,11 @@ func (m *Manager) Init() error {
 	m.cfg = cfg
 
 	if m.cfg.Relay.Enabled && m.cfg.Relay.ListenAddr != "" {
-		m.relay = relay.NewServer(m.cfg.Relay.ListenAddr, m.cfg.Relay.Token)
+		creds := make(map[string]string)
+		for _, u := range m.cfg.Relay.Users {
+			creds[u.User] = u.Password
+		}
+		m.relay = relay.NewServer(m.cfg.Relay.ListenAddr, creds)
 		if err := m.relay.Start(); err != nil {
 			return fmt.Errorf("relay start: %w", err)
 		}

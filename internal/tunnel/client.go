@@ -22,7 +22,8 @@ type TunnelInfo struct {
 
 type Client struct {
 	relayAddr string
-	token     string
+	user      string
+	password  string
 	localDir  string
 
 	mux         *protocol.MuxConn
@@ -35,10 +36,11 @@ type Client struct {
 	closing     chan struct{}
 }
 
-func NewClient(relayAddr, token, localDir string) *Client {
+func NewClient(relayAddr, user, password, localDir string) *Client {
 	return &Client{
 		relayAddr:   relayAddr,
-		token:       token,
+		user:        user,
+		password:    password,
 		localDir:    localDir,
 		handlers:    make(map[uint32]net.Conn),
 		pendingData: make(map[uint32][][]byte),
@@ -72,8 +74,8 @@ func (c *Client) connect() error {
 		c.handleStreamData(streamID, data)
 	})
 
-	if c.token != "" {
-		mux.SendCtrl(protocol.CtrlMsg{Type: "auth", Token: c.token})
+	if c.user != "" || c.password != "" {
+		mux.SendCtrl(protocol.CtrlMsg{Type: "auth", User: c.user, Password: c.password})
 		if _, ok := c.waitCtrl("auth_ok"); !ok {
 			conn.Close()
 			return fmt.Errorf("authentication failed")
@@ -254,29 +256,31 @@ func (c *Client) Stop() {
 	c.Close()
 }
 
-func LoadClientConfig(dir string) (string, string, []TunnelInfo, error) {
+func LoadClientConfig(dir string) (string, string, string, []TunnelInfo, error) {
 	path := filepath.Join(dir, "tunnel.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
 	var cfg struct {
 		RelayAddr string       `json:"relay_addr"`
-		Token     string       `json:"token,omitempty"`
+		User      string       `json:"user,omitempty"`
+		Password  string       `json:"password,omitempty"`
 		Tunnels   []TunnelInfo `json:"tunnels"`
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return "", "", nil, err
+		return "", "", "", nil, err
 	}
-	return cfg.RelayAddr, cfg.Token, cfg.Tunnels, nil
+	return cfg.RelayAddr, cfg.User, cfg.Password, cfg.Tunnels, nil
 }
 
-func SaveClientConfig(dir, relayAddr, token string, tunnels []TunnelInfo) error {
+func SaveClientConfig(dir, relayAddr, user, password string, tunnels []TunnelInfo) error {
 	cfg := struct {
 		RelayAddr string       `json:"relay_addr"`
-		Token     string       `json:"token,omitempty"`
+		User      string       `json:"user,omitempty"`
+		Password  string       `json:"password,omitempty"`
 		Tunnels   []TunnelInfo `json:"tunnels"`
-	}{RelayAddr: relayAddr, Token: token, Tunnels: tunnels}
+	}{RelayAddr: relayAddr, User: user, Password: password, Tunnels: tunnels}
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err

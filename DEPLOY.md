@@ -333,6 +333,34 @@ Relay 服务器默认监听 7000 端口（可在 `config.json` 的 `relay.listen
 sudo ufw allow 7000/tcp
 ```
 
+### 配置 Relay 认证（可选）
+
+编辑 `/etc/portmap/config.json` 添加认证用户：
+
+```json
+{
+  "relay": {
+    "enabled": true,
+    "listen_addr": "0.0.0.0:7000",
+    "users": [
+      {"user": "admin", "password": "your_password"}
+    ]
+  }
+}
+```
+
+重启使配置生效：
+```bash
+sudo systemctl restart portmap
+```
+
+客户端连接时需提供用户名密码：
+```bash
+./portmap connect --relay-addr <vps公网IP>:7000 -u admin -P your_password
+```
+
+不配置 `users` 则无需认证。
+
 ### 在 VPS 上添加映射
 
 ```bash
@@ -349,7 +377,11 @@ sudo -E portmap start my-app -g infra
 ### 方式一：命令行启动（手动）
 
 ```bash
+# 无需认证
 ./portmap connect --relay-addr <vps公网IP>:7000
+
+# 需要认证
+./portmap connect --relay-addr <vps公网IP>:7000 -u admin -P your_password
 ```
 
 此方式从服务端 config.json 读取映射配置并建立隧道。
@@ -361,6 +393,8 @@ sudo -E portmap start my-app -g infra
 ```json
 {
   "relay_addr": "vps公网IP:7000",
+  "user": "admin",
+  "password": "your_password",
   "tunnels": [
     {
       "mapping_id": "infra/my-app",
@@ -387,7 +421,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/portmap connect --relay-addr <vps公网IP>:7000
+ExecStart=/usr/local/bin/portmap connect --relay-addr <vps公网IP>:7000 -u admin -P your_password
 Restart=always
 RestartSec=5
 User=nobody

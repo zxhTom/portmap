@@ -17,6 +17,8 @@ type CtrlMsg struct {
 	LocalPort  int    `json:"local_port,omitempty"`
 	StreamID   uint32 `json:"stream_id,omitempty"`
 	Message    string `json:"message,omitempty"`
+	User       string `json:"user,omitempty"`
+	Password   string `json:"password,omitempty"`
 	Token      string `json:"token,omitempty"`
 }
 

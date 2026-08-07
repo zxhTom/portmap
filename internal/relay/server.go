@@ -22,7 +22,7 @@ type mappingState struct {
 type Server struct {
 	mu              sync.Mutex
 	addr            string
-	token           string
+	credentials     map[string]string
 	listener        net.Listener
 	closing         atomic.Bool
 	mappings        map[string]*mappingState
@@ -32,10 +32,10 @@ type Server struct {
 	handlersL       sync.Mutex
 }
 
-func NewServer(addr, token string) *Server {
+func NewServer(addr string, credentials map[string]string) *Server {
 	return &Server{
 		addr:            addr,
-		token:           token,
+		credentials:     credentials,
 		mappings:        make(map[string]*mappingState),
 		configuredPorts: make(map[string]int),
 		handlers:        make(map[uint32]net.Conn),
@@ -84,7 +84,7 @@ func (s *Server) handleClient(mux *protocol.MuxConn) {
 		s.handleStreamData(streamID, data)
 	})
 
-	authenticated := s.token == ""
+	authenticated := len(s.credentials) == 0
 	for {
 		select {
 		case msg, ok := <-mux.CtrlChan():
@@ -93,15 +93,29 @@ func (s *Server) handleClient(mux *protocol.MuxConn) {
 			}
 			switch msg.Type {
 			case "auth":
-				if s.token != "" && msg.Token == s.token {
+				if len(s.credentials) > 0 {
+					passwd, ok := s.credentials[msg.User]
+					if ok && passwd == msg.Password {
+						authenticated = true
+						mux.SendCtrl(protocol.CtrlMsg{Type: "auth_ok"})
+					} else {
+						mux.SendCtrl(protocol.CtrlMsg{Type: "auth_error", Message: "invalid credentials"})
+						mux.Conn().Close()
+						return
+					}
+				} else if msg.Token != "" {
+					_, ok := s.credentials[msg.Token]
+					if len(s.credentials) == 0 || ok {
+						authenticated = true
+						mux.SendCtrl(protocol.CtrlMsg{Type: "auth_ok"})
+					} else {
+						mux.SendCtrl(protocol.CtrlMsg{Type: "auth_error", Message: "invalid token"})
+						mux.Conn().Close()
+						return
+					}
+				} else {
 					authenticated = true
 					mux.SendCtrl(protocol.CtrlMsg{Type: "auth_ok"})
-				} else if s.token == "" {
-					mux.SendCtrl(protocol.CtrlMsg{Type: "auth_ok"})
-				} else {
-					mux.SendCtrl(protocol.CtrlMsg{Type: "auth_error", Message: "invalid token"})
-					mux.Conn().Close()
-					return
 				}
 			case "register":
 				if !authenticated {
