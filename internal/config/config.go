@@ -2,50 +2,58 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
 
-type PortRange struct {
-	Start int `json:"start"`
-	End   int `json:"end"`
+type AuthConfig struct {
+	Method     string `json:"method"`
+	Password   string `json:"password,omitempty"`
+	KeyPath    string `json:"key_path,omitempty"`
+	Passphrase string `json:"passphrase,omitempty"`
+}
+
+type Remote struct {
+	Name       string     `json:"name"`
+	Host       string     `json:"host"`
+	Port       int        `json:"port"`
+	User       string     `json:"user"`
+	Auth       AuthConfig `json:"auth"`
+	StrictHost bool       `json:"strict_host,omitempty"`
+}
+
+func (r Remote) Addr() string {
+	if r.Port == 0 {
+		return r.Host + ":22"
+	}
+	return fmt.Sprintf("%s:%d", r.Host, r.Port)
 }
 
 type Mapping struct {
 	Name       string `json:"name"`
+	ListenPort int    `json:"listen_port"`
+	LocalHost  string `json:"local_host"`
 	LocalPort  int    `json:"local_port"`
-	TargetHost string `json:"target_host"`
-	TargetPort int    `json:"target_port"`
+	Remote     string `json:"remote"`
 }
 
 type Group struct {
-	Name      string     `json:"name"`
-	PortRange *PortRange `json:"port_range,omitempty"`
-	Mappings  []Mapping  `json:"mappings"`
-}
-
-type RelayCredential struct {
-	User     string `json:"user"`
-	Password string `json:"password"`
-}
-
-type RelayConfig struct {
-	Enabled     bool               `json:"enabled"`
-	ListenAddr  string             `json:"listen_addr"`
-	Token       string             `json:"token,omitempty"`
-	Users       []RelayCredential  `json:"users,omitempty"`
+	Name     string    `json:"name"`
+	Mappings []Mapping `json:"mappings"`
 }
 
 type Config struct {
-	BindAddr  string      `json:"bind_addr"`
-	PortRange PortRange   `json:"port_range"`
-	Relay     RelayConfig `json:"relay,omitempty"`
-	Groups    []Group     `json:"groups"`
+	Remotes []Remote `json:"remotes"`
+	Groups  []Group  `json:"groups"`
+}
+
+func DefaultConfig() Config {
+	return Config{}
 }
 
 type MappingState struct {
 	Running   bool   `json:"running"`
-	LocalPort int    `json:"local_port"`
 	StartedAt string `json:"started_at,omitempty"`
 }
 
@@ -53,24 +61,12 @@ type State struct {
 	Mappings map[string]MappingState `json:"mappings"`
 }
 
-func DefaultConfig() Config {
-	return Config{
-		BindAddr: "0.0.0.0",
-		PortRange: PortRange{
-			Start: 20000,
-			End:   30000,
-		},
-	}
-}
-
 func DefaultState() State {
-	return State{
-		Mappings: make(map[string]MappingState),
-	}
+	return State{Mappings: make(map[string]MappingState)}
 }
 
 func LoadConfig(dir string) (Config, error) {
-	c := DefaultConfig()
+	var c Config
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return c, err
 	}
@@ -96,12 +92,11 @@ func SaveConfig(dir string, c Config) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "config.json")
-	tmp := path + ".tmp"
+	tmp := filepath.Join(dir, "config.json.tmp")
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, filepath.Join(dir, "config.json"))
 }
 
 func LoadState(dir string) (State, error) {
@@ -128,10 +123,9 @@ func SaveState(dir string, s State) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "state.json")
-	tmp := path + ".tmp"
+	tmp := filepath.Join(dir, "state.json.tmp")
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, filepath.Join(dir, "state.json"))
 }

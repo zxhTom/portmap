@@ -7,8 +7,7 @@ import (
 	"time"
 
 	"github.com/zxhtom/portmap/internal/config"
-	"github.com/zxhtom/portmap/internal/proxy"
-	"github.com/zxhtom/portmap/internal/relay"
+	"github.com/zxhtom/portmap/internal/sshclient"
 )
 
 type mappingKey struct {
@@ -23,23 +22,21 @@ func (k mappingKey) String() string {
 type entry struct {
 	Mapping config.Mapping
 	Group   string
-	Proxy   *proxy.Proxy
+	Tunnel  *sshclient.Tunnel
 }
 
 type Manager struct {
-	mu    sync.Mutex
-	dir   string
-	cfg   config.Config
-	state config.State
-
-	proxies map[mappingKey]*entry
-	relay   *relay.Server
+	mu      sync.Mutex
+	dir     string
+	cfg     config.Config
+	state   config.State
+	entries map[mappingKey]*entry
 }
 
 func New(dir string) *Manager {
 	return &Manager{
 		dir:     dir,
-		proxies: make(map[mappingKey]*entry),
+		entries: make(map[mappingKey]*entry),
 	}
 }
 
@@ -49,17 +46,6 @@ func (m *Manager) Init() error {
 		return fmt.Errorf("load config: %w", err)
 	}
 	m.cfg = cfg
-
-	if m.cfg.Relay.Enabled && m.cfg.Relay.ListenAddr != "" {
-		creds := make(map[string]string)
-		for _, u := range m.cfg.Relay.Users {
-			creds[u.User] = u.Password
-		}
-		m.relay = relay.NewServer(m.cfg.Relay.ListenAddr, creds)
-		if err := m.relay.Start(); err != nil {
-			return fmt.Errorf("relay start: %w", err)
-		}
-	}
 
 	state, err := config.LoadState(m.dir)
 	if err != nil {
@@ -71,177 +57,101 @@ func (m *Manager) Init() error {
 		for _, mp := range g.Mappings {
 			key := mappingKey{Group: g.Name, Name: mp.Name}
 			e := &entry{Mapping: mp, Group: g.Name}
-			m.proxies[key] = e
+			m.entries[key] = e
 
 			st, ok := m.state.Mappings[key.String()]
 			if !ok {
-				st = config.MappingState{Running: false, LocalPort: mp.LocalPort}
+				st = config.MappingState{Running: false}
 				m.state.Mappings[key.String()] = st
 			}
-			if ok && st.Running {
-				m.restoreMappingLocked(key, e, st)
+			if st.Running {
+				m.startMappingLocked(key, e, st)
 			}
 		}
 	}
-	if err := config.SaveState(m.dir, m.state); err != nil {
-		return fmt.Errorf("save state: %w", err)
-	}
+	config.SaveState(m.dir, m.state)
 	return nil
-}
-
-func (m *Manager) restoreMappingLocked(key mappingKey, e *entry, st config.MappingState) {
-	localPort := st.LocalPort
-	if localPort == 0 {
-		localPort = e.Mapping.LocalPort
-	}
-	group := m.mustGroup(key.Group)
-	if group == nil {
-		return
-	}
-	if localPort == 0 {
-		localPort = m.autoPort(*group)
-	}
-
-	if m.HasRelay() {
-		e.Mapping.LocalPort = localPort
-		st.LocalPort = localPort
-	} else {
-		lnAddr := fmt.Sprintf("%s:%d", m.cfg.BindAddr, localPort)
-		tgAddr := fmt.Sprintf("%s:%d", e.Mapping.TargetHost, e.Mapping.TargetPort)
-		e.Proxy = proxy.New(lnAddr, tgAddr)
-		if err := e.Proxy.Start(); err != nil {
-			slog.Error("restore proxy failed", "key", key.String(), "err", err)
-			st.Running = false
-		}
-		st.LocalPort = localPort
-	}
-	m.state.Mappings[key.String()] = st
 }
 
 func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for _, e := range m.proxies {
-		if e.Proxy != nil {
-			e.Proxy.Stop()
+	for _, e := range m.entries {
+		if e.Tunnel != nil {
+			e.Tunnel.Close()
 		}
-	}
-	if m.relay != nil {
-		m.relay.Close()
 	}
 	config.SaveState(m.dir, m.state)
 }
 
-func (m *Manager) HasRelay() bool {
-	return m.relay != nil
+func (m *Manager) RemoteByName(name string) (config.Remote, error) {
+	for _, r := range m.cfg.Remotes {
+		if r.Name == name {
+			return r, nil
+		}
+	}
+	return config.Remote{}, fmt.Errorf("remote %q not found", name)
 }
 
-func (m *Manager) Relay() *relay.Server {
-	return m.relay
+func (m *Manager) AddRemote(r config.Remote) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, existing := range m.cfg.Remotes {
+		if existing.Name == r.Name {
+			return fmt.Errorf("remote %q already exists", r.Name)
+		}
+	}
+	m.cfg.Remotes = append(m.cfg.Remotes, r)
+	return config.SaveConfig(m.dir, m.cfg)
 }
 
-func (m *Manager) AddMapping(groupName string, mp config.Mapping, autoAssign bool) (config.Mapping, error) {
+func (m *Manager) DeleteRemote(name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i, r := range m.cfg.Remotes {
+		if r.Name == name {
+			m.cfg.Remotes = append(m.cfg.Remotes[:i], m.cfg.Remotes[i+1:]...)
+			return config.SaveConfig(m.dir, m.cfg)
+		}
+	}
+	return fmt.Errorf("remote %q not found", name)
+}
+
+func (m *Manager) AddMapping(groupName string, mp config.Mapping) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	group := m.findOrCreateGroup(groupName)
-	key := mappingKey{Group: group.Name, Name: mp.Name}
-
-	if _, exists := m.proxies[key]; exists {
-		return mp, fmt.Errorf("mapping %s already exists", key.String())
+	if mp.LocalHost == "" || mp.LocalPort == 0 {
+		return fmt.Errorf("local_host and local_port are required")
+	}
+	if mp.ListenPort == 0 {
+		return fmt.Errorf("listen_port is required (port on remote server)")
+	}
+	if mp.Remote == "" {
+		return fmt.Errorf("remote is required (reference to a configured remote)")
 	}
 
-	if mp.TargetHost == "" || mp.TargetPort == 0 {
-		return mp, fmt.Errorf("target_host and target_port are required")
+	if _, err := m.RemoteByName(mp.Remote); err != nil {
+		return err
 	}
-
-	if autoAssign || mp.LocalPort == 0 {
-		mp.LocalPort = m.autoPort(*group)
-	}
-
-	group.Mappings = append(group.Mappings, mp)
-	e := &entry{Mapping: mp, Group: group.Name}
-	m.proxies[key] = e
-
-	st := config.MappingState{
-		Running:   false,
-		LocalPort: mp.LocalPort,
-	}
-	m.state.Mappings[key.String()] = st
-
-	if err := m.save(); err != nil {
-		return mp, err
-	}
-	slog.Info("mapping added", "key", key.String(), "target", fmt.Sprintf("%s:%d", mp.TargetHost, mp.TargetPort), "local_port", mp.LocalPort)
-	return mp, nil
-}
-
-func (m *Manager) UpdateMapping(groupName string, mp config.Mapping) (config.Mapping, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	key := mappingKey{Group: groupName, Name: mp.Name}
-	existing, ok := m.proxies[key]
-	if !ok {
-		return mp, fmt.Errorf("mapping %s not found", key.String())
+	if _, exists := m.entries[key]; exists {
+		return fmt.Errorf("mapping %s already exists", key.String())
 	}
 
-	if mp.TargetHost != "" {
-		existing.Mapping.TargetHost = mp.TargetHost
-	}
-	if mp.TargetPort != 0 {
-		existing.Mapping.TargetPort = mp.TargetPort
-	}
+	group := m.findOrCreateGroup(groupName)
+	group.Mappings = append(group.Mappings, mp)
+	m.entries[key] = &entry{Mapping: mp, Group: groupName}
 
-	needsRestart := false
-	if existing.Proxy != nil && (mp.TargetHost != "" || mp.TargetPort != 0) {
-		needsRestart = true
-		existing.Proxy.Stop()
-		existing.Proxy = nil
-	}
+	m.state.Mappings[key.String()] = config.MappingState{Running: false}
 
-	if mp.LocalPort > 0 && mp.LocalPort != existing.Mapping.LocalPort {
-		if needsRestart {
-			existing.Mapping.LocalPort = mp.LocalPort
-		} else if existing.Proxy != nil {
-			existing.Proxy.Stop()
-			existing.Proxy = nil
-			existing.Mapping.LocalPort = mp.LocalPort
-			needsRestart = true
-		} else {
-			existing.Mapping.LocalPort = mp.LocalPort
-			st := m.state.Mappings[key.String()]
-			st.LocalPort = mp.LocalPort
-			m.state.Mappings[key.String()] = st
-		}
+	if err := config.SaveConfig(m.dir, m.cfg); err != nil {
+		return err
 	}
-
-	if needsRestart {
-		st := m.state.Mappings[key.String()]
-		if st.Running {
-			p := m.newProxy(existing.Mapping, groupName)
-			existing.Proxy = p
-			if err := p.Start(); err != nil {
-				slog.Error("restart proxy failed", "key", key.String(), "err", err)
-				st.Running = false
-				m.state.Mappings[key.String()] = st
-			}
-		}
-	}
-
-	group := m.mustGroup(groupName)
-	for i := range group.Mappings {
-		if group.Mappings[i].Name == mp.Name {
-			group.Mappings[i] = existing.Mapping
-			break
-		}
-	}
-
-	if err := m.save(); err != nil {
-		return mp, err
-	}
-	slog.Info("mapping updated", "key", key.String())
-	return existing.Mapping, nil
+	config.SaveState(m.dir, m.state)
+	slog.Info("mapping added", "key", key.String(), "remote", mp.Remote, "listen", mp.ListenPort, "target", fmt.Sprintf("%s:%d", mp.LocalHost, mp.LocalPort))
+	return nil
 }
 
 func (m *Manager) DeleteMapping(groupName, name string) error {
@@ -249,16 +159,16 @@ func (m *Manager) DeleteMapping(groupName, name string) error {
 	defer m.mu.Unlock()
 
 	key := mappingKey{Group: groupName, Name: name}
-	e, ok := m.proxies[key]
+	e, ok := m.entries[key]
 	if !ok {
 		return fmt.Errorf("mapping %s not found", key.String())
 	}
 
-	if e.Proxy != nil {
-		e.Proxy.Stop()
+	if e.Tunnel != nil {
+		e.Tunnel.Close()
 	}
 
-	delete(m.proxies, key)
+	delete(m.entries, key)
 	delete(m.state.Mappings, key.String())
 
 	group := m.mustGroup(groupName)
@@ -270,9 +180,10 @@ func (m *Manager) DeleteMapping(groupName, name string) error {
 	}
 	group.Mappings = filtered
 
-	if err := m.save(); err != nil {
+	if err := config.SaveConfig(m.dir, m.cfg); err != nil {
 		return err
 	}
+	config.SaveState(m.dir, m.state)
 	slog.Info("mapping deleted", "key", key.String())
 	return nil
 }
@@ -282,7 +193,7 @@ func (m *Manager) StartMapping(groupName, name string) error {
 	defer m.mu.Unlock()
 
 	key := mappingKey{Group: groupName, Name: name}
-	e, ok := m.proxies[key]
+	e, ok := m.entries[key]
 	if !ok {
 		return fmt.Errorf("mapping %s not found", key.String())
 	}
@@ -292,33 +203,26 @@ func (m *Manager) StartMapping(groupName, name string) error {
 		return fmt.Errorf("mapping %s is already running", key.String())
 	}
 
-	if m.HasRelay() {
-		if e.Mapping.LocalPort == 0 {
-			e.Mapping.LocalPort = m.autoPort(*m.mustGroup(groupName))
-		}
-		st.Running = true
-		st.StartedAt = time.Now().Format(time.RFC3339)
-		st.LocalPort = e.Mapping.LocalPort
-		m.state.Mappings[key.String()] = st
-		m.save()
-		m.relay.SetPort(key.String(), e.Mapping.LocalPort)
-		slog.Info("mapping started (relay)", "key", key.String(), "port", e.Mapping.LocalPort)
-		return nil
+	return m.startMappingLocked(key, e, st)
+}
+
+func (m *Manager) startMappingLocked(key mappingKey, e *entry, st config.MappingState) error {
+	remote, err := m.RemoteByName(e.Mapping.Remote)
+	if err != nil {
+		return err
 	}
 
-	e.Proxy = m.newProxy(e.Mapping, groupName)
-	if err := e.Proxy.Start(); err != nil {
-		e.Proxy = nil
-		return fmt.Errorf("start mapping %s: %w", key.String(), err)
+	e.Tunnel = sshclient.NewTunnel(remote, e.Mapping)
+	if err := e.Tunnel.Dial(remote); err != nil {
+		e.Tunnel = nil
+		return fmt.Errorf("start %s: %w", key.String(), err)
 	}
 
 	st.Running = true
 	st.StartedAt = time.Now().Format(time.RFC3339)
-	st.LocalPort = e.Mapping.LocalPort
 	m.state.Mappings[key.String()] = st
-
 	config.SaveState(m.dir, m.state)
-	slog.Info("mapping started", "key", key.String(), "port", e.Mapping.LocalPort)
+	slog.Info("mapping started", "key", key.String())
 	return nil
 }
 
@@ -327,7 +231,7 @@ func (m *Manager) StopMapping(groupName, name string) error {
 	defer m.mu.Unlock()
 
 	key := mappingKey{Group: groupName, Name: name}
-	e, ok := m.proxies[key]
+	e, ok := m.entries[key]
 	if !ok {
 		return fmt.Errorf("mapping %s not found", key.String())
 	}
@@ -337,27 +241,14 @@ func (m *Manager) StopMapping(groupName, name string) error {
 		return fmt.Errorf("mapping %s is not running", key.String())
 	}
 
-	if m.HasRelay() {
-		m.relay.DeregisterAndClose(key.String())
-		st.Running = false
-		st.StartedAt = ""
-		m.state.Mappings[key.String()] = st
-		m.save()
-		slog.Info("mapping stopped (relay)", "key", key.String())
-		return nil
+	if e.Tunnel != nil {
+		e.Tunnel.Close()
+		e.Tunnel = nil
 	}
-
-	if e.Proxy == nil {
-		return fmt.Errorf("mapping %s is not running", key.String())
-	}
-
-	e.Proxy.Stop()
-	e.Proxy = nil
 
 	st.Running = false
 	st.StartedAt = ""
 	m.state.Mappings[key.String()] = st
-
 	config.SaveState(m.dir, m.state)
 	slog.Info("mapping stopped", "key", key.String())
 	return nil
@@ -368,41 +259,22 @@ func (m *Manager) StartGroup(name string) error {
 	defer m.mu.Unlock()
 
 	group := m.mustGroup(name)
+	if group == nil {
+		return fmt.Errorf("group %q not found", name)
+	}
 	var errs []error
 	for _, mp := range group.Mappings {
 		key := mappingKey{Group: name, Name: mp.Name}
-		e, ok := m.proxies[key]
-		if !ok {
-			continue
-		}
+		e := m.entries[key]
 		st := m.state.Mappings[key.String()]
 		if st.Running {
 			continue
 		}
-		if m.HasRelay() {
-			if e.Mapping.LocalPort == 0 {
-				e.Mapping.LocalPort = m.autoPort(*group)
-			}
-			st.Running = true
-			st.StartedAt = time.Now().Format(time.RFC3339)
-			st.LocalPort = e.Mapping.LocalPort
-			m.state.Mappings[key.String()] = st
-			m.relay.SetPort(key.String(), e.Mapping.LocalPort)
-		} else {
-			e.Proxy = m.newProxy(e.Mapping, name)
-			if err := e.Proxy.Start(); err != nil {
-				e.Proxy = nil
-				errs = append(errs, fmt.Errorf("%s: %w", mp.Name, err))
-				continue
-			}
-			st.Running = true
-			st.StartedAt = time.Now().Format(time.RFC3339)
-			st.LocalPort = e.Mapping.LocalPort
-			m.state.Mappings[key.String()] = st
+		if err := m.startMappingLocked(key, e, st); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	m.save()
 	if len(errs) > 0 {
 		return fmt.Errorf("start group %s: %v", name, errs)
 	}
@@ -415,28 +287,25 @@ func (m *Manager) StopGroup(name string) error {
 	defer m.mu.Unlock()
 
 	group := m.mustGroup(name)
+	if group == nil {
+		return fmt.Errorf("group %q not found", name)
+	}
 	for _, mp := range group.Mappings {
 		key := mappingKey{Group: name, Name: mp.Name}
-		e, ok := m.proxies[key]
-		if !ok {
-			continue
-		}
+		e := m.entries[key]
 		st := m.state.Mappings[key.String()]
 		if !st.Running {
 			continue
 		}
-		if m.HasRelay() {
-			m.relay.DeregisterAndClose(key.String())
-		} else if e.Proxy != nil {
-			e.Proxy.Stop()
-			e.Proxy = nil
+		if e.Tunnel != nil {
+			e.Tunnel.Close()
+			e.Tunnel = nil
 		}
 		st.Running = false
 		st.StartedAt = ""
 		m.state.Mappings[key.String()] = st
 	}
-
-	m.save()
+	config.SaveState(m.dir, m.state)
 	slog.Info("group stopped", "group", name)
 	return nil
 }
@@ -445,32 +314,20 @@ func (m *Manager) ListMappings() []MappingInfo {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	var activeTunnels map[string]bool
-	if m.relay != nil {
-		activeTunnels = m.relay.ActiveTunnels()
-	}
-
-	var result []MappingInfo
-	for key, e := range m.proxies {
+	result := make([]MappingInfo, 0, len(m.entries))
+	for key, e := range m.entries {
 		st := m.state.Mappings[key.String()]
 		status := "stopped"
 		if st.Running {
-			if activeTunnels != nil {
-				if activeTunnels[key.String()] {
-					status = "connected"
-				} else {
-					status = "waiting"
-				}
-			} else {
-				status = "running"
-			}
+			status = "running"
 		}
 		result = append(result, MappingInfo{
 			Group:      key.Group,
 			Name:       key.Name,
-			LocalPort:  st.LocalPort,
-			TargetHost: e.Mapping.TargetHost,
-			TargetPort: e.Mapping.TargetPort,
+			Remote:     e.Mapping.Remote,
+			ListenPort: e.Mapping.ListenPort,
+			LocalHost:  e.Mapping.LocalHost,
+			LocalPort:  e.Mapping.LocalPort,
 			Status:     status,
 			StartedAt:  st.StartedAt,
 		})
@@ -481,26 +338,12 @@ func (m *Manager) ListMappings() []MappingInfo {
 type MappingInfo struct {
 	Group      string `json:"group"`
 	Name       string `json:"name"`
+	Remote     string `json:"remote"`
+	ListenPort int    `json:"listen_port"`
+	LocalHost  string `json:"local_host"`
 	LocalPort  int    `json:"local_port"`
-	TargetHost string `json:"target_host"`
-	TargetPort int    `json:"target_port"`
 	Status     string `json:"status"`
 	StartedAt  string `json:"started_at,omitempty"`
-}
-
-func (m *Manager) SetBindAddr(addr string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.cfg.BindAddr = addr
-	config.SaveConfig(m.dir, m.cfg)
-}
-
-func (m *Manager) Groups() []config.Group {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	result := make([]config.Group, len(m.cfg.Groups))
-	copy(result, m.cfg.Groups)
-	return result
 }
 
 func (m *Manager) findOrCreateGroup(name string) *config.Group {
@@ -520,48 +363,4 @@ func (m *Manager) mustGroup(name string) *config.Group {
 		}
 	}
 	return nil
-}
-
-func (m *Manager) newProxy(mp config.Mapping, groupName string) *proxy.Proxy {
-	lnAddr := fmt.Sprintf("%s:%d", m.cfg.BindAddr, mp.LocalPort)
-	tgAddr := fmt.Sprintf("%s:%d", mp.TargetHost, mp.TargetPort)
-	return proxy.New(lnAddr, tgAddr)
-}
-
-func (m *Manager) autoPort(group config.Group) int {
-	start := m.cfg.PortRange.Start
-	end := m.cfg.PortRange.End
-	if group.PortRange != nil {
-		start = group.PortRange.Start
-		end = group.PortRange.End
-	}
-
-	used := make(map[int]bool)
-	for _, e := range m.proxies {
-		if e.Mapping.LocalPort > 0 {
-			used[e.Mapping.LocalPort] = true
-		}
-	}
-
-	for p := start; p <= end; p++ {
-		if !used[p] {
-			return p
-		}
-	}
-	return start
-}
-
-func (m *Manager) save() error {
-	for _, g := range m.cfg.Groups {
-		for i := range g.Mappings {
-			key := mappingKey{Group: g.Name, Name: g.Mappings[i].Name}
-			if e, ok := m.proxies[key]; ok {
-				g.Mappings[i] = e.Mapping
-			}
-		}
-	}
-	if err := config.SaveConfig(m.dir, m.cfg); err != nil {
-		return err
-	}
-	return config.SaveState(m.dir, m.state)
 }

@@ -1,5 +1,5 @@
 [Unit]
-Description=Portmap - Port Mapping Manager
+Description=Portmap SSH Tunnel Manager
 After=network.target
 
 [Service]
@@ -7,8 +7,6 @@ Type=simple
 ExecStart=/usr/local/bin/portmap serve --log-file=/var/log/portmap/portmap.log
 Restart=always
 RestartSec=5
-User=nobody
-Group=nogroup
 Environment=PORTMAP_HOME=/etc/portmap
 
 [Install]
