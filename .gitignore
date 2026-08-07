@@ -1,0 +1,4 @@
+/portmap
+*.tmp
+.idea/
+.vscode/
