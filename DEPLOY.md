@@ -1,35 +1,35 @@
-# Deployment Guide (Linux)
+# 部署指南（Linux）
 
-## Prerequisites
+## 环境要求
 
-- Linux server with Go 1.25+ (build host) or pre-built binary
-- Systemd (most modern Linux distributions)
+- Linux 服务器，Go 1.25+（编译机器）或预编译的二进制文件
+- Systemd（大多数现代 Linux 发行版）
 
-## 1. Build
+## 1. 编译
 
-On your build machine (can be the target server or a separate machine, as long as the architecture matches):
+在编译机器上执行（可以是目标服务器，也可以是架构相同的其他机器）：
 
 ```bash
-git clone <your-repo-url> portmap
+git clone <仓库地址> portmap
 cd portmap
 CGO_ENABLED=0 go build -ldflags="-s -w" -o portmap ./cmd/portmap/
 ```
 
-This produces a statically linked `portmap` binary (~6 MB).
+生成静态链接的 `portmap` 二进制文件（约 6 MB）。
 
-If building on a different architecture, set `GOOS` and `GOARCH`:
+如果交叉编译，设置 `GOOS` 和 `GOARCH`：
 ```bash
 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags="-s -w" -o portmap ./cmd/portmap/
 ```
 
-## 2. Install Binary
+## 2. 安装二进制
 
 ```bash
 sudo cp portmap /usr/local/bin/portmap
 sudo chmod +x /usr/local/bin/portmap
 ```
 
-## 3. Create Directories
+## 3. 创建目录
 
 ```bash
 sudo mkdir -p /etc/portmap
@@ -37,22 +37,22 @@ sudo mkdir -p /var/log/portmap
 sudo chown nobody:nogroup /var/log/portmap
 ```
 
-## 4. Install systemd Service
+## 4. 安装 systemd 服务
 
 ```bash
 sudo cp deploy/portmap.service /etc/systemd/system/portmap.service
 sudo systemctl daemon-reload
 ```
 
-Verify the service file contents:
+检查服务文件内容：
 ```bash
 cat /etc/systemd/system/portmap.service
 ```
 
-Expected:
+预期内容：
 ```ini
 [Unit]
-Description=Portmap - Port Mapping Manager
+Description=Portmap - 端口映射管理器
 After=network.target
 
 [Service]
@@ -68,28 +68,28 @@ Environment=PORTMAP_HOME=/etc/portmap
 WantedBy=multi-user.target
 ```
 
-### Security note
+### 安全说明
 
-The service runs as `nobody:nogroup` by default. This user needs:
-- Read/write access to `$PORTMAP_HOME` (config + state files)
-- Write access to the log file path
-- Permission to bind to the configured ports
+服务默认以 `nobody:nogroup` 用户运行，该用户需要：
+- `$PORTMAP_HOME` 目录的读写权限（配置和状态文件）
+- 日志文件路径的写入权限
+- 绑定所配置端口的权限
 
-Port binding below 1024 requires `CAP_NET_BIND_SERVICE` or root. If you need low ports, add to the service file:
+绑定 1024 以下端口需要 `CAP_NET_BIND_SERVICE` 或 root 权限。如需使用低端口，在 service 文件中添加：
 ```ini
 [Service]
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ```
 
-Or change User to root (not recommended):
+或改为 root 用户（不推荐）：
 ```ini
 User=root
 ```
 
-## 5. Configure portmap
+## 5. 配置 portmap
 
-Edit `/etc/portmap/config.json`:
+编辑 `/etc/portmap/config.json`：
 
 ```json
 {
@@ -102,9 +102,9 @@ Edit `/etc/portmap/config.json`:
 }
 ```
 
-Or add mappings interactively after starting the daemon (see below).
+也可以在服务启动后通过 CLI 交互式添加映射（见下文）。
 
-## 6. Start the Service
+## 6. 启动服务
 
 ```bash
 sudo systemctl enable portmap
@@ -112,43 +112,43 @@ sudo systemctl start portmap
 sudo systemctl status portmap
 ```
 
-Check logs:
+查看日志：
 ```bash
 sudo journalctl -u portmap -f
-# or
+# 或
 sudo tail -f /var/log/portmap/portmap.log
 ```
 
-## 7. Add Port Mappings
+## 7. 添加端口映射
 
-The daemon is now running. Use the CLI to manage mappings:
+Daemon 启动后，使用 CLI 管理映射：
 
 ```bash
-# Point CLI at the daemon's API
+# 指向 daemon 的 API
 export PORTMAP_HOME=/etc/portmap
 
-# Add a mapping: public port 20000 -> internal 10.0.0.5:8080
+# 添加映射：公网端口 20000 → 内网 10.0.0.5:8080
 sudo -E portmap add my-api --target-host 10.0.0.5 --target-port 8080 -g web
 
-# Start it
+# 启动
 sudo -E portmap start my-api -g web
 
-# View
+# 查看
 sudo -E portmap list
 ```
 
-Since the daemon runs as `nobody`, the CLI also needs read/write access to `$PORTMAP_HOME` or communicate purely via the API. Running CLI commands with `sudo -E` ensures access.
+由于 daemon 以 `nobody` 身份运行，CLI 也需要对 `$PORTMAP_HOME` 有读写权限，或纯通过 API 通信。使用 `sudo -E` 可以确保权限。
 
-Alternatively, if you grant your admin user access to the data directory:
+如果希望管理员用户直接操作，可以改变数据目录权限：
 ```bash
 sudo chown -R youruser:youruser /etc/portmap
 ```
 
-Then update the service file's `User` to match, or keep using `sudo`.
+然后修改 service 文件中的 `User` 为对应用户，或继续使用 `sudo`。
 
-## 8. Firewall
+## 8. 防火墙
 
-Ensure the mapped ports are open in your firewall:
+确保映射的端口在防火墙中开放：
 
 ```bash
 # ufw
@@ -162,101 +162,101 @@ sudo firewall-cmd --permanent --add-port=20000-30000/tcp
 sudo firewall-cmd --reload
 ```
 
-## 9. Verify
+## 9. 验证
 
-From an external machine:
+从外部机器测试：
 
 ```bash
-# Test that the mapped port is reachable
-curl http://<server-public-ip>:20000
+# 测试映射端口是否可达
+curl http://<服务器公网IP>:20000
 
-# Or check port is open
-nc -zv <server-public-ip> 20000
+# 或检查端口是否开放
+nc -zv <服务器公网IP> 20000
 ```
 
-## 10. Management Commands
+## 10. 常用管理命令
 
 ```bash
-# List all mappings
+# 查看所有映射
 sudo -E portmap list
 
-# Add a mapping with fixed port
+# 添加指定端口的映射
 sudo -E portmap add grafana --target-host 10.0.0.10 --target-port 3000 -p 23000 -g infra
 
-# Update target
+# 更新目标
 sudo -E portmap update grafana -g infra --target-port 3001
 
-# Start/stop individual mapping
+# 启动/停止单条映射
 sudo -E portmap start grafana -g infra
 sudo -E portmap stop grafana -g infra
 
-# Start/stop entire group
+# 启动/停止整组
 sudo -E portmap group start web
 sudo -E portmap group stop web
 
-# Delete a mapping (stops it first)
+# 删除映射（会先停止）
 sudo -E portmap delete grafana -g infra
 ```
 
-## Upgrading
+## 升级
 
 ```bash
-# Stop service
+# 停止服务
 sudo systemctl stop portmap
 
-# Replace binary
+# 替换二进制
 sudo cp portmap /usr/local/bin/portmap
 
-# Start service
+# 启动服务
 sudo systemctl start portmap
 
-# Mappings are restored from state.json automatically
+# 映射状态从 state.json 自动恢复
 ```
 
-## Troubleshooting
+## 故障排查
 
-### Service fails to start
+### 服务启动失败
 
 ```bash
 sudo journalctl -u portmap -n 50 --no-pager
 ```
 
-Common issues:
-- **Port already in use**: Check `ss -tlnp | grep <port>`
-- **Permission denied on data dir**: `sudo chown nobody:nogroup /etc/portmap`
-- **Bind address already in use**: Another process or a previous portmap instance is using the port
+常见原因：
+- **端口被占用**：检查 `ss -tlnp | grep <端口>`
+- **数据目录权限不足**：`sudo chown nobody:nogroup /etc/portmap`
+- **绑定地址已被使用**：其他进程或残留的 portmap 实例占用了端口
 
-### CLI can't connect to daemon
+### CLI 无法连接 daemon
 
 ```bash
-# Check daemon is running
+# 检查 daemon 是否在运行
 sudo systemctl status portmap
 
-# Check API is listening
+# 检查 API 是否在监听
 ss -tlnp | grep 9876
 
-# Verify PORTMAP_HOME matches daemon's config
+# 确认 PORTMAP_HOME 与 daemon 配置一致
 echo $PORTMAP_HOME
 ```
 
-### Mappings not persisting across restarts
+### 重启后映射状态丢失
 
-Ensure `nobody` has write permission to `$PORTMAP_HOME/state.json`:
+确保 `nobody` 对 `$PORTMAP_HOME/state.json` 有写权限：
 ```bash
 sudo chown nobody:nogroup /etc/portmap/state.json
 sudo chmod 600 /etc/portmap/state.json
 ```
 
-### Low port binding (<1024)
+### 绑定低端口（<1024）
 
-Add to service file:
+在 service 文件中添加：
 ```ini
 [Service]
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 ```
 
-Then:
+然后：
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl restart portmap
@@ -264,44 +264,44 @@ sudo systemctl restart portmap
 
 ---
 
-# Relay Tunnel Deployment (NAT Traversal)
+# Relay 隧道部署（内网穿透）
 
-This setup is for the **ABC scenario**: A (internal, no public IP) → B (VPS, public IP) tunnel, C (external client) accesses A through B.
+适用于 **ABC 三机场景**：A（内网，无公网 IP）通过隧道连接到 B（VPS，有公网 IP），C（外部客户端）通过 B 访问 A。
 
-## Architecture
+## 架构
 
 ```
-Internal machine A              VPS B (public IP)           External client C
-┌──────────────┐    tunnel     ┌──────────────┐           ┌──────────┐
-│ portmap      │────outbound──→│ portmap serve │           │          │
-│ connect      │               │  --relay     │←───TCP───│ client   │
-│              │               │  port 20000  │           │          │
-│ target:8080  │               └──────────────┘           └──────────┘
+内网机器 A                   VPS B（公网）             外部客户端 C
+┌──────────────┐   隧道      ┌──────────────┐        ┌──────────┐
+│ portmap      │──出站连接──→│ portmap serve │        │          │
+│ connect      │            │  --relay     │←─TCP──│ 客户端   │
+│              │            │  :20000      │        │          │
+│ 目标:8080    │            └──────────────┘        └──────────┘
 └──────────────┘
 ```
 
-- **A** initiates the outbound tunnel to B (only A→B direction needs to be reachable)
-- **B** listens on public ports, forwards traffic through the tunnel to A
-- **C** connects to B's public port just like any normal service
+- **A** 主动向 B 发起出站隧道连接（仅需 A→B 方向可达）
+- **B** 监听公网端口，通过隧道将流量转发到 A
+- **C** 像访问普通服务一样连接 B 的公网端口
 
-## Deploy on VPS (B)
+## VPS（B）部署
 
-Same as the standard deployment, but with `--relay`:
+与标准部署相同，但加上 `--relay` 参数：
 
 ```bash
-# Build and install as before
+# 编译并安装（同标准部署步骤）
 sudo cp portmap /usr/local/bin/portmap
 sudo mkdir -p /etc/portmap /var/log/portmap
 sudo chown nobody:nogroup /var/log/portmap
 ```
 
-### Service file (with relay)
+### 带 relay 的 service 文件
 
-`/etc/systemd/system/portmap.service`:
+`/etc/systemd/system/portmap.service`：
 
 ```ini
 [Unit]
-Description=Portmap Relay Server
+Description=Portmap Relay 服务器
 After=network.target
 
 [Service]
@@ -313,7 +313,7 @@ User=nobody
 Group=nogroup
 Environment=PORTMAP_HOME=/etc/portmap
 
-# For ports below 1024 (optional)
+# 如需绑定 1024 以下端口（可选）
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
@@ -321,46 +321,46 @@ CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 ```
 
-Enable and start:
+启用并启动：
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now portmap
 ```
 
-The relay server listens on port 7000 (default, configurable in `config.json` `relay.listen_addr`). Make sure this port is reachable from internal machine A:
+Relay 服务器默认监听 7000 端口（可在 `config.json` 的 `relay.listen_addr` 中配置）。确保内网机器 A 能访问此端口：
 
 ```bash
 sudo ufw allow 7000/tcp
 ```
 
-### Add mappings on VPS
+### 在 VPS 上添加映射
 
 ```bash
-sudo -E portmap add my-app --target-host <any-ip> --target-port 8080 -g infra
+sudo -E portmap add my-app --target-host <任意IP> --target-port 8080 -g infra
 sudo -E portmap start my-app -g infra
 ```
 
-Note: `--target-host` and `--target-port` here are informational (shown in list). The actual target is determined by the tunnel client on machine A.
+注意：此处的 `--target-host` 和 `--target-port` 仅用于列表展示。实际目标由机器 A 上的隧道客户端决定。
 
-## Deploy on Internal Machine (A)
+## 内网机器（A）部署
 
-The internal machine only needs the `portmap` binary — no service needed. It runs `portmap connect`.
+内网机器只需要 `portmap` 二进制文件，运行 `portmap connect` 即可。
 
-### Option 1: Simple CLI (manual)
+### 方式一：命令行启动（手动）
 
 ```bash
-./portmap connect --relay-addr <vps-public-ip>:7000
+./portmap connect --relay-addr <vps公网IP>:7000
 ```
 
-This reads mappings from the server's config and tunnels them all.
+此方式从服务端 config.json 读取映射配置并建立隧道。
 
-### Option 2: tunnel.json (explicit)
+### 方式二：tunnel.json 配置（显式指定）
 
-Create `~/.config/portmap/tunnel.json`:
+创建 `~/.config/portmap/tunnel.json`：
 
 ```json
 {
-  "relay_addr": "vps-public-ip:7000",
+  "relay_addr": "vps公网IP:7000",
   "tunnels": [
     {
       "mapping_id": "infra/my-app",
@@ -371,23 +371,23 @@ Create `~/.config/portmap/tunnel.json`:
 }
 ```
 
-Then run:
+然后运行：
 ```bash
 ./portmap connect
 ```
 
-### Option 3: systemd service for auto-start on A
+### 方式三：systemd 服务实现开机自启
 
-`/etc/systemd/system/portmap-tunnel.service`:
+`/etc/systemd/system/portmap-tunnel.service`：
 
 ```ini
 [Unit]
-Description=Portmap Tunnel Client
+Description=Portmap 隧道客户端
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/portmap connect --relay-addr <vps-public-ip>:7000
+ExecStart=/usr/local/bin/portmap connect --relay-addr <vps公网IP>:7000
 Restart=always
 RestartSec=5
 User=nobody
@@ -402,33 +402,33 @@ WantedBy=multi-user.target
 sudo systemctl enable --now portmap-tunnel
 ```
 
-The tunnel client auto-reconnects on connection loss.
+隧道客户端在连接断开后会自动重连。
 
-## Verify
+## 验证
 
-On VPS (B):
+在 VPS（B）上：
 ```bash
 sudo -E portmap list
 ```
 
-Should show:
+应显示：
 ```
 GROUP  NAME     STATUS     LOCAL_PORT  TARGET
 infra  my-app   connected  20000       127.0.0.1:8080
 ```
 
-Status `connected` means the tunnel is active.
+状态 `connected` 表示隧道已激活。
 
-From external client (C):
+从外部客户端（C）测试：
 ```bash
-curl http://<vps-public-ip>:20000
+curl http://<vps公网IP>:20000
 ```
 
-## Firewall Summary
+## 防火墙总览
 
-| Machine | Port    | Direction | Purpose           |
-|---------|---------|-----------|-------------------|
-| VPS B   | 20000+  | IN        | Public mapped ports |
-| VPS B   | 7000    | IN        | Relay tunnel from A |
-| VPS B   | 9876    | LOCAL     | Management API |
-| Machine A | any   | OUT       | Outbound to B:7000 |
+| 机器      | 端口     | 方向    | 用途               |
+|----------|---------|---------|-------------------|
+| VPS B    | 20000+  | 入站    | 对外映射端口        |
+| VPS B    | 7000    | 入站    | A 发起的 relay 隧道 |
+| VPS B    | 9876    | 本地    | 管理 API           |
+| 机器 A   | 任意    | 出站    | 连接到 B:7000      |
