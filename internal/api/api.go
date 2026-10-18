@@ -27,8 +27,13 @@ func NewServer(mgr *manager.Manager) *Server {
 	mux.HandleFunc("/api/mappings", s.handleMappings)
 	mux.HandleFunc("/api/mappings/", s.handleMappingByPath)
 	mux.HandleFunc("/api/groups/", s.handleGroupByPath)
+	mux.HandleFunc("/api/docker/containers", s.handleDockerContainers)
 	s.handler = mux
 	return s
+}
+
+func (s *Server) Handler() http.Handler {
+	return s.handler
 }
 
 func (s *Server) Listen(addr string) error {
@@ -121,12 +126,20 @@ func (s *Server) handleMappingByPath(w http.ResponseWriter, r *http.Request) {
 	if len(segments) == 2 {
 		switch segments[1] {
 		case "start":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
 			if err := s.mgr.StartMapping(group, name); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			writeJSON(w, map[string]string{"message": "started"})
 		case "stop":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
 			if err := s.mgr.StopMapping(group, name); err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
 				return
@@ -141,12 +154,16 @@ func (s *Server) handleMappingByPath(w http.ResponseWriter, r *http.Request) {
 }
 
 type addMappingRequest struct {
-	Group      string `json:"group"`
-	Name       string `json:"name"`
-	Remote     string `json:"remote"`
-	ListenPort int    `json:"listen_port"`
-	LocalHost  string `json:"local_host"`
-	LocalPort  int    `json:"local_port"`
+	Group         string `json:"group"`
+	Name          string `json:"name"`
+	Type          string `json:"type"`
+	Remote        string `json:"remote"`
+	ListenPort    int    `json:"listen_port"`
+	LocalHost     string `json:"local_host"`
+	LocalPort     int    `json:"local_port"`
+	Container     string `json:"container"`
+	ContainerPort int    `json:"container_port"`
+	BindHost      string `json:"bind_host"`
 }
 
 func (s *Server) addMapping(w http.ResponseWriter, r *http.Request) {
@@ -163,14 +180,23 @@ func (s *Server) addMapping(w http.ResponseWriter, r *http.Request) {
 		req.Group = "default"
 	}
 	mp := config.Mapping{
-		Name:       req.Name,
-		Remote:     req.Remote,
-		ListenPort: req.ListenPort,
-		LocalHost:  req.LocalHost,
-		LocalPort:  req.LocalPort,
+		Name:          req.Name,
+		Type:          req.Type,
+		Remote:        req.Remote,
+		ListenPort:    req.ListenPort,
+		LocalHost:     req.LocalHost,
+		LocalPort:     req.LocalPort,
+		Container:     req.Container,
+		ContainerPort: req.ContainerPort,
+		BindHost:      req.BindHost,
+	}
+	mp.SetDefaults()
+	if err := mp.Validate(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 	if err := s.mgr.AddMapping(req.Group, mp); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	writeJSON(w, mp)
@@ -185,6 +211,10 @@ func (s *Server) handleGroupByPath(w http.ResponseWriter, r *http.Request) {
 	if len(segments) == 2 {
 		switch segments[1] {
 		case "start":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
 			err := s.mgr.StartGroup(groupName)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -192,6 +222,10 @@ func (s *Server) handleGroupByPath(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, map[string]string{"message": "started"})
 		case "stop":
+			if r.Method != http.MethodPost {
+				writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+				return
+			}
 			err := s.mgr.StopGroup(groupName)
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, err.Error())
@@ -204,6 +238,21 @@ func (s *Server) handleGroupByPath(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "not found")
+}
+
+// --- docker ---
+
+func (s *Server) handleDockerContainers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	containers, err := s.mgr.ListDockerContainers()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	writeJSON(w, containers)
 }
 
 // --- helpers ---

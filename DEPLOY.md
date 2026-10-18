@@ -155,3 +155,22 @@ ssh root@VPS的IP echo ok
 ## 防火墙
 
 内网机器 A 只需要能 **出站** 访问 VPS 的 SSH 端口（默认 22），不需要开放任何入站端口。
+
+---
+
+## 7. Docker 映射部署说明
+
+除了 SSH 隧道外，若需将本地未发布端口的 Docker 容器映射到本地端口：
+
+```bash
+# 启动 daemon 并指定 Docker 选项（可选）
+portmap serve --docker-host="unix:///var/run/docker.sock"
+
+# 添加容器转发
+portmap add db-forward --type=docker --container=my-db --container-port=5432 -l 15432 --bind-host=127.0.0.1
+portmap start db-forward
+```
+
+- **macOS / Docker Desktop 用户**：Docker Socket 路径通常为 `unix://$HOME/.docker/run/docker.sock`，可在启动 `portmap serve` 时通过 `--docker-host` 指定。
+- **孤儿资源清理与自愈**：portmap 启动时自动通过 `portmap.managed` 及实例 ID 标签执行有界清理并报告失败，随后才按上次记录恢复运行状态；停止映射时会主动回滚已创建的关联资源。
+- **协议说明**：Docker 转发仅支持 TCP 协议。

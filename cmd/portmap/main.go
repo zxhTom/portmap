@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"text/tabwriter"
 
@@ -19,21 +20,27 @@ import (
 )
 
 var (
-	dataDir    string
-	apiAddr    string
-	logFile    string
-	group      string
-	listenPort int
-	localHost  string
-	localPort  int
-	remoteName string
-	remoteHost string
-	remotePort int
-	remoteUser string
-	authMethod string
-	authPass   string
-	authKey    string
-	authPhrase string
+	dataDir           string
+	apiAddr           string
+	logFile           string
+	group             string
+	mappingType       string
+	listenPort        int
+	localHost         string
+	localPort         int
+	containerName     string
+	containerPort     int
+	bindHost          string
+	dockerHost        string
+	dockerHelperImage string
+	remoteName        string
+	remoteHost        string
+	remotePort        int
+	remoteUser        string
+	authMethod        string
+	authPass          string
+	authKey           string
+	authPhrase        string
 )
 
 func dataDirPath() string {
@@ -76,6 +83,16 @@ var serveCmd = &cobra.Command{
 		initSlog()
 		dir := dataDirPath()
 		mgr := manager.New(dir)
+
+		var hostOverride, imageOverride *string
+		if cmd.Flags().Changed("docker-host") {
+			hostOverride = &dockerHost
+		}
+		if cmd.Flags().Changed("docker-helper-image") {
+			imageOverride = &dockerHelperImage
+		}
+		mgr.SetDockerOverrides(hostOverride, imageOverride)
+
 		if err := mgr.Init(); err != nil {
 			return fmt.Errorf("init: %w", err)
 		}
@@ -138,14 +155,48 @@ var addCmd = &cobra.Command{
 	Short: "Add a port mapping",
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if mappingType == "" {
+			mappingType = "ssh"
+		}
+		if mappingType != "ssh" && mappingType != "docker" {
+			return fmt.Errorf("invalid type: %q (must be 'ssh' or 'docker')", mappingType)
+		}
+		if listenPort <= 0 || listenPort > 65535 {
+			return fmt.Errorf("--listen port must be between 1 and 65535")
+		}
+
 		req := map[string]interface{}{
 			"group":       group,
 			"name":        args[0],
-			"remote":      remoteName,
+			"type":        mappingType,
 			"listen_port": listenPort,
-			"local_host":  localHost,
-			"local_port":  localPort,
 		}
+
+		if mappingType == "ssh" {
+			if remoteName == "" {
+				return fmt.Errorf("--remote is required for ssh mapping")
+			}
+			if localPort <= 0 || localPort > 65535 {
+				return fmt.Errorf("--local-port must be between 1 and 65535 for ssh mapping")
+			}
+			req["remote"] = remoteName
+			req["local_host"] = localHost
+			req["local_port"] = localPort
+		} else { // docker
+			if containerName == "" {
+				return fmt.Errorf("--container is required for docker mapping")
+			}
+			if containerPort <= 0 || containerPort > 65535 {
+				return fmt.Errorf("--container-port must be between 1 and 65535 for docker mapping")
+			}
+			req["container"] = containerName
+			req["container_port"] = containerPort
+			if bindHost == "" {
+				bindHost = "127.0.0.1"
+			}
+			req["bind_host"] = bindHost
+		}
+
 		return apiPost("/api/mappings", req)
 	},
 }
@@ -177,14 +228,76 @@ var listCmd = &cobra.Command{
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "GROUP\tNAME\tREMOTE\tSTATUS\tLISTEN\tTARGET\tSTARTED")
+		fmt.Fprintln(w, "GROUP\tNAME\tTYPE\tREMOTE/BIND\tSTATUS\tLISTEN\tTARGET\tSTARTED")
 		for _, m := range mappings {
+			mpType := m.Type
+			if mpType == "" {
+				mpType = "ssh"
+			}
+			remoteOrBind := m.Remote
 			target := fmt.Sprintf("%s:%d", m.LocalHost, m.LocalPort)
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-				m.Group, m.Name, m.Remote, m.Status, m.ListenPort, target, m.StartedAt)
+			if mpType == "docker" {
+				remoteOrBind = m.BindHost
+				target = fmt.Sprintf("%s:%d", m.Container, m.ContainerPort)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
+				m.Group, m.Name, mpType, remoteOrBind, m.Status, m.ListenPort, target, m.StartedAt)
 		}
 		return w.Flush()
 	},
+}
+
+// --- docker commands ---
+
+var dockerListCmd = &cobra.Command{
+	Use:   "list",
+	Short: "List discoverable Docker containers and ports",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		resp, err := httpClient().Get(apiURL("/api/docker/containers"))
+		if err != nil {
+			return fmt.Errorf("request: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("docker error (%d): %s", resp.StatusCode, body)
+		}
+		var containers []struct {
+			ID             string `json:"id"`
+			Name           string `json:"name"`
+			State          string `json:"state"`
+			DeclaredPorts  []int  `json:"declared_ports"`
+			PublishedPorts []struct {
+				HostIP        string `json:"host_ip"`
+				HostPort      int    `json:"host_port"`
+				ContainerPort int    `json:"container_port"`
+				Protocol      string `json:"protocol"`
+			} `json:"published_ports"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&containers); err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "CONTAINER ID\tNAME\tSTATE\tDECLARED PORTS\tPUBLISHED PORTS")
+		for _, c := range containers {
+			var dec []string
+			for _, p := range c.DeclaredPorts {
+				dec = append(dec, fmt.Sprintf("%d", p))
+			}
+			var pub []string
+			for _, p := range c.PublishedPorts {
+				pub = append(pub, fmt.Sprintf("%s:%d->%d/%s", p.HostIP, p.HostPort, p.ContainerPort, p.Protocol))
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+				c.ID, c.Name, c.State, strings.Join(dec, ","), strings.Join(pub, ","))
+		}
+		return w.Flush()
+	},
+}
+
+var dockerCmd = &cobra.Command{
+	Use:   "docker",
+	Short: "Docker management",
 }
 
 var startCmd = &cobra.Command{
@@ -265,11 +378,13 @@ func apiDelete(url string) error {
 	return nil
 }
 
-func main() {
+func init() {
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Data directory (default ~/.config/portmap)")
 	rootCmd.PersistentFlags().StringVar(&apiAddr, "api-addr", "127.0.0.1:9876", "API address")
 
 	serveCmd.Flags().StringVar(&logFile, "log-file", "", "Log file path")
+	serveCmd.Flags().StringVar(&dockerHost, "docker-host", "", "Docker daemon host (e.g. unix:///var/run/docker.sock)")
+	serveCmd.Flags().StringVar(&dockerHelperImage, "docker-helper-image", "", "Docker helper image for port-forwarding")
 
 	// remote add flags
 	remoteAddCmd.Flags().StringVar(&remoteHost, "host", "", "VPS hostname or IP (required)")
@@ -283,21 +398,29 @@ func main() {
 
 	// add mapping flags
 	addCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
-	addCmd.Flags().StringVarP(&remoteName, "remote", "r", "", "Remote name (VPS, required)")
-	addCmd.Flags().IntVarP(&listenPort, "listen", "l", 0, "Listen port on VPS (required)")
-	addCmd.Flags().StringVar(&localHost, "local-host", "127.0.0.1", "Local target host")
-	addCmd.Flags().IntVarP(&localPort, "local-port", "p", 0, "Local target port (required)")
-	addCmd.MarkFlagRequired("remote")
+	addCmd.Flags().StringVarP(&mappingType, "type", "t", "ssh", "Mapping type: 'ssh' or 'docker'")
+	addCmd.Flags().StringVarP(&remoteName, "remote", "r", "", "Remote name (VPS, required for ssh)")
+	addCmd.Flags().IntVarP(&listenPort, "listen", "l", 0, "Listen port (VPS port for ssh, host port for docker)")
+	addCmd.Flags().StringVar(&localHost, "local-host", "127.0.0.1", "Local target host (for ssh)")
+	addCmd.Flags().IntVarP(&localPort, "local-port", "p", 0, "Local target port (for ssh)")
+	addCmd.Flags().StringVar(&containerName, "container", "", "Target container name or ID (for docker)")
+	addCmd.Flags().IntVar(&containerPort, "container-port", 0, "Target container port (for docker)")
+	addCmd.Flags().StringVar(&bindHost, "bind-host", "127.0.0.1", "Host bind IP address (for docker)")
 	addCmd.MarkFlagRequired("listen")
-	addCmd.MarkFlagRequired("local-port")
 
 	deleteCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 	startCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 	stopCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 
+	dockerCmd.AddCommand(dockerListCmd)
 	groupCmd.AddCommand(groupStartCmd, groupStopCmd)
 	remoteCmd.AddCommand(remoteAddCmd, remoteDeleteCmd)
 
-	rootCmd.AddCommand(serveCmd, remoteCmd, addCmd, deleteCmd, listCmd, startCmd, stopCmd, groupCmd)
-	rootCmd.Execute()
+	rootCmd.AddCommand(serveCmd, remoteCmd, addCmd, deleteCmd, listCmd, startCmd, stopCmd, groupCmd, dockerCmd)
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }

@@ -193,3 +193,35 @@ portmap group stop <分组名>            # 停止整组
 ```
 
 daemon 重启后自动恢复上次状态。
+
+## Docker 容器端口转发
+
+除了传统的 SSH 反向隧道，portmap 支持将本机或远程未发布端口（未暴露到宿主机端口）的 Docker 容器直接转发到宿主机本地监听。
+
+### 两类映射命令对比
+
+1. **SSH 映射**（默认 `type=ssh`）：
+   ```bash
+   portmap add myapp --type=ssh -r myvps -l 19999 -p 9999 -g web
+   ```
+2. **Docker 映射**（`type=docker`）：
+   ```bash
+   portmap add web-proxy --type=docker --container=my-nginx --container-port=80 -l 8080 --bind-host=127.0.0.1
+   ```
+   可使用 `portmap docker list` 发现本机运行中的 Docker 容器与其已声明/已发布的端口信息。
+
+### 守护进程参数与 Docker Socket
+
+启动 `portmap serve` 时，可通过参数显式覆盖 Docker 守护进程连接与 Helper 镜像：
+```bash
+portmap serve --docker-host="unix:///Users/user/.docker/run/docker.sock" --docker-helper-image="ghcr.io/iammathew/docker-port-forward/sidecar:latest"
+```
+- **Helper 镜像要求**：默认使用 `ghcr.io/iammathew/docker-port-forward/sidecar:latest`；若使用自定义镜像，镜像内需提供 `socat` 可执行文件，并兼容 `sleep infinity` 的默认入口调用（例如避免镜像固定 `ENTRYPOINT=socat` 导致追加 `Cmd ["sleep", "infinity"]` 无法作为后台驻留容器启动）。
+- **macOS / Docker Desktop**：如遇默认 socket 不可达，通常位于 `unix://$HOME/.docker/run/docker.sock`。
+- **默认监听地址**：`--bind-host` 默认安全绑定至 `127.0.0.1`，避免非预期暴露到公网。
+
+### 资源所有权、恢复机制与限制
+
+- **标签隔离**：portmap 为由其创建的 bridge 网络和 helper 容器附加 `portmap.managed=true` 及唯一的 `portmap.instance_id` 实例标签，绝不误触宿主机上的其他容器与网络。
+- **恢复与清理**：`portmap serve` 启动时首先在有界超时内尝试清理当前实例残留的孤儿 helper 容器与辅助网络并报告失败，随后才按上次记录恢复运行状态；停止映射时会主动回滚已创建的关联资源。
+- **协议限制**：当前 Docker 端口转发基于底层 TCP 流，仅支持 **TCP** 协议，不支持 UDP。

@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
 	"github.com/zxhtom/portmap/internal/config"
+	"github.com/zxhtom/portmap/internal/forward"
 )
 
 type Tunnel struct {
@@ -22,8 +24,15 @@ type Tunnel struct {
 	ListenAddr string
 	TargetAddr string
 
+	remote  config.Remote
+	mapping config.Mapping
+
+	mu      sync.Mutex
+	status  forward.Status
 	client  *ssh.Client
+	ln      net.Listener
 	closing chan struct{}
+	closed  bool
 }
 
 func NewTunnel(remote config.Remote, mapping config.Mapping) *Tunnel {
@@ -33,18 +42,44 @@ func NewTunnel(remote config.Remote, mapping config.Mapping) *Tunnel {
 		RemoteAddr: remote.Addr(),
 		ListenAddr: fmt.Sprintf("0.0.0.0:%d", mapping.ListenPort),
 		TargetAddr: target,
+		remote:     remote,
+		mapping:    mapping,
+		status:     forward.Status{State: forward.StateStopped},
 		closing:    make(chan struct{}),
 	}
 }
 
+func (t *Tunnel) Status() forward.Status {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.status
+}
+
+func (t *Tunnel) Start() error {
+	return t.Dial(t.remote)
+}
+
 func (t *Tunnel) Dial(remote config.Remote) error {
+	t.mu.Lock()
+	if t.closed {
+		t.closing = make(chan struct{})
+		t.closed = false
+	}
+	t.status = forward.Status{State: forward.StateStarting}
+	t.mu.Unlock()
+
 	authMethods, err := buildAuth(remote.Auth)
 	if err != nil {
+		t.setStatus(forward.StateFailed, fmt.Sprintf("auth: %v", err))
 		return fmt.Errorf("auth: %w", err)
 	}
 
 	hostKeyCb, err := loadKnownHosts()
 	if err != nil {
+		if remote.StrictHost {
+			t.setStatus(forward.StateFailed, fmt.Sprintf("strict host key verification required: %v", err))
+			return fmt.Errorf("strict host key: %w", err)
+		}
 		slog.Warn("known_hosts not available, host key verification disabled", "err", err)
 		hostKeyCb = ssh.InsecureIgnoreHostKey()
 	}
@@ -63,40 +98,98 @@ func (t *Tunnel) Dial(remote config.Remote) error {
 
 	client, err := ssh.Dial("tcp", addr, cfg)
 	if err != nil {
+		t.setStatus(forward.StateFailed, fmt.Sprintf("ssh dial: %v", err))
 		return fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
 
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		client.Close()
+		return fmt.Errorf("tunnel closed while connecting")
+	}
 	t.client = client
+	t.mu.Unlock()
 	slog.Info("ssh connected", "remote", remote.Name, "addr", addr)
 
-	go t.keepListenAlive()
+	ln, err := client.Listen("tcp", t.ListenAddr)
+	if err != nil {
+		t.mu.Lock()
+		t.client = nil
+		t.mu.Unlock()
+		client.Close()
+		t.setStatus(forward.StateFailed, fmt.Sprintf("listen on remote %s failed: %v", t.ListenAddr, err))
+		return fmt.Errorf("remote listen %s: %w", t.ListenAddr, err)
+	}
+
+	t.mu.Lock()
+	if t.closed {
+		t.client = nil
+		t.mu.Unlock()
+		ln.Close()
+		client.Close()
+		return fmt.Errorf("tunnel closed while listening")
+	}
+	t.ln = ln
+	t.status = forward.Status{State: forward.StateRunning}
+	t.mu.Unlock()
+
+	go t.serveAndSupervise(ln)
 	return nil
 }
 
-func (t *Tunnel) keepListenAlive() {
-	for {
-		ln, err := t.client.Listen("tcp", t.ListenAddr)
-		if err != nil {
-			select {
-			case <-t.closing:
-				return
-			default:
-			}
-			slog.Error("remote listen failed", "addr", t.ListenAddr, "err", err)
-			return
-		}
-		slog.Info("reverse tunnel listening", "remote", t.RemoteName, "listen", t.ListenAddr, "target", t.TargetAddr)
+func (t *Tunnel) setStatus(state forward.State, errStr string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.status = forward.Status{
+		State: state,
+		Error: errStr,
+	}
+}
 
-		err = t.serve(ln)
-		ln.Close()
+func (t *Tunnel) serveAndSupervise(initialLn net.Listener) {
+	ln := initialLn
+	for {
+		err := t.serve(ln)
+		if ln != nil {
+			ln.Close()
+		}
 
 		select {
 		case <-t.closing:
 			return
 		default:
-			slog.Warn("listener closed, retrying", "addr", t.ListenAddr, "err", err)
-			time.Sleep(2 * time.Second)
 		}
+
+		t.setStatus(forward.StateFailed, fmt.Sprintf("remote listener disconnected: %v", err))
+		slog.Warn("listener closed, attempting reconnection", "addr", t.ListenAddr, "err", err)
+
+		// Wait before retrying
+		select {
+		case <-t.closing:
+			return
+		case <-time.After(2 * time.Second):
+		}
+
+		t.mu.Lock()
+		client := t.client
+		t.mu.Unlock()
+
+		if client == nil {
+			return
+		}
+
+		newLn, err := client.Listen("tcp", t.ListenAddr)
+		if err != nil {
+			t.setStatus(forward.StateFailed, fmt.Sprintf("remote listen failed: %v", err))
+			continue
+		}
+
+		t.mu.Lock()
+		t.ln = newLn
+		t.status = forward.Status{State: forward.StateRunning}
+		t.mu.Unlock()
+		ln = newLn
 	}
 }
 
@@ -127,12 +220,28 @@ func (t *Tunnel) pipe(remote net.Conn) {
 	<-done
 }
 
-func (t *Tunnel) Close() {
-	close(t.closing)
-	if t.client != nil {
-		t.client.Close()
-		t.client = nil
+func (t *Tunnel) Close() error {
+	t.mu.Lock()
+	if t.closed {
+		t.mu.Unlock()
+		return nil
 	}
+	t.closed = true
+	close(t.closing)
+	ln := t.ln
+	t.ln = nil
+	client := t.client
+	t.client = nil
+	t.status = forward.Status{State: forward.StateStopped}
+	t.mu.Unlock()
+
+	if ln != nil {
+		_ = ln.Close()
+	}
+	if client != nil {
+		_ = client.Close()
+	}
+	return nil
 }
 
 func buildAuth(auth config.AuthConfig) ([]ssh.AuthMethod, error) {
