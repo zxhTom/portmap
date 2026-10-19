@@ -1,6 +1,8 @@
 [Unit]
-Description=Portmap SSH Tunnel Manager
-After=network.target
+Description=Portmap SSH and Docker Port Mapping Manager
+Wants=network-online.target
+After=network-online.target docker.service
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -8,6 +10,9 @@ ExecStart=/usr/local/bin/portmap serve --log-file=/var/log/portmap/portmap.log
 Restart=always
 RestartSec=5
 Environment=PORTMAP_HOME=/etc/portmap
+ConfigurationDirectory=portmap
+LogsDirectory=portmap
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

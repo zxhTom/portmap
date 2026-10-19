@@ -1,0 +1,22 @@
+[Unit]
+Description=Portmap central domain registry and HTTP router
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=zxhtom
+Group=zxhtom
+Environment=HOME=/home/zxhtom
+ExecStart=/home/zxhtom/.local/bin/portmap relay serve --listen 127.0.0.1:9881 --zone port.toms.chat
+Restart=always
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

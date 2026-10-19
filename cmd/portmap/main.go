@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -16,31 +18,41 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/zxhtom/portmap/internal/api"
+	"github.com/zxhtom/portmap/internal/config"
 	"github.com/zxhtom/portmap/internal/manager"
+	"github.com/zxhtom/portmap/internal/multipassclient"
+	"github.com/zxhtom/portmap/internal/webui"
 )
 
 var (
-	dataDir           string
-	apiAddr           string
-	logFile           string
-	group             string
-	mappingType       string
-	listenPort        int
-	localHost         string
-	localPort         int
-	containerName     string
-	containerPort     int
-	bindHost          string
-	dockerHost        string
-	dockerHelperImage string
-	remoteName        string
-	remoteHost        string
-	remotePort        int
-	remoteUser        string
-	authMethod        string
-	authPass          string
-	authKey           string
-	authPhrase        string
+	domainPrefixes []string
+	upstreamScheme string
+
+	webAddr, webCert, webKey string
+	dataDir                  string
+	apiAddr                  string
+	logFile                  string
+	group                    string
+	mappingType              string
+	description              string
+	listenPort               int
+	localHost                string
+	localPort                int
+	containerName            string
+	containerPort            int
+	bindHost                 string
+	instanceName             string
+	instancePort             int
+	dockerHost               string
+	dockerHelperImage        string
+	remoteName               string
+	remoteHost               string
+	remotePort               int
+	remoteUser               string
+	authMethod               string
+	authPass                 string
+	authKey                  string
+	authPhrase               string
 )
 
 func dataDirPath() string {
@@ -96,17 +108,34 @@ var serveCmd = &cobra.Command{
 		if err := mgr.Init(); err != nil {
 			return fmt.Errorf("init: %w", err)
 		}
+		// Stop reconciliation before closing backends and releasing the instance lock.
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() { defer close(done); mgr.Run(ctx) }()
+		defer func() { cancel(); <-done; mgr.Shutdown() }()
 		srv := api.NewServer(mgr)
 		if err := srv.Listen(apiAddr); err != nil {
 			return fmt.Errorf("api: %w", err)
 		}
+		defer srv.Close()
+		if webAddr != "" {
+			web, err := webui.New(mgr, srv.Handler())
+			if err != nil {
+				slog.Error("web console unavailable", "err", err)
+			} else if err := web.Listen(webAddr, webCert, webKey); err != nil {
+				slog.Error("web console unavailable", "err", err)
+			} else {
+				defer web.Close()
+				slog.Info("web console started", "addr", webAddr)
+			}
+		}
 		slog.Info("portmap started", "dir", dir, "api", apiAddr)
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		defer signal.Stop(sigCh)
 		<-sigCh
 		slog.Info("shutting down...")
 		srv.Close()
-		mgr.Shutdown()
 		return nil
 	},
 }
@@ -158,18 +187,21 @@ var addCmd = &cobra.Command{
 		if mappingType == "" {
 			mappingType = "ssh"
 		}
-		if mappingType != "ssh" && mappingType != "docker" {
-			return fmt.Errorf("invalid type: %q (must be 'ssh' or 'docker')", mappingType)
+		if mappingType != "ssh" && mappingType != "docker" && mappingType != "multipass" {
+			return fmt.Errorf("invalid type: %q (must be 'ssh', 'docker' or 'multipass')", mappingType)
 		}
-		if listenPort <= 0 || listenPort > 65535 {
-			return fmt.Errorf("--listen port must be between 1 and 65535")
+		if listenPort < 0 || listenPort > 65535 {
+			return fmt.Errorf("--listen must be 1–65535; omit it for a random relay port")
 		}
 
 		req := map[string]interface{}{
-			"group":       group,
-			"name":        args[0],
-			"type":        mappingType,
-			"listen_port": listenPort,
+			"group":           group,
+			"name":            args[0],
+			"type":            mappingType,
+			"listen_port":     listenPort,
+			"description":     description,
+			"expires_at":      addExpiresAt,
+			"domain_prefixes": domainPrefixes, "upstream_scheme": upstreamScheme,
 		}
 
 		if mappingType == "ssh" {
@@ -182,6 +214,17 @@ var addCmd = &cobra.Command{
 			req["remote"] = remoteName
 			req["local_host"] = localHost
 			req["local_port"] = localPort
+		} else if mappingType == "multipass" {
+			if !config.ValidInstanceName(instanceName) {
+				return fmt.Errorf("--instance must be a Multipass instance name")
+			}
+			if instancePort < 1 || instancePort > 65535 {
+				return fmt.Errorf("--instance-port must be between 1 and 65535")
+			}
+			req["instance"] = instanceName
+			req["instance_port"] = instancePort
+			req["bind_host"] = bindHost
+			req["remote"] = remoteName
 		} else { // docker
 			if containerName == "" {
 				return fmt.Errorf("--container is required for docker mapping")
@@ -228,7 +271,7 @@ var listCmd = &cobra.Command{
 			return err
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-		fmt.Fprintln(w, "GROUP\tNAME\tTYPE\tREMOTE/BIND\tSTATUS\tLISTEN\tTARGET\tSTARTED")
+		fmt.Fprintln(w, "GROUP\tNAME\tTYPE\tREMOTE/BIND\tSTATUS\tHEALTH/FAILURES\tLISTEN\tTARGET\tSTARTED\tEXPIRES\tREASON\tDOMAINS\tDESCRIPTION")
 		for _, m := range mappings {
 			mpType := m.Type
 			if mpType == "" {
@@ -240,8 +283,14 @@ var listCmd = &cobra.Command{
 				remoteOrBind = m.BindHost
 				target = fmt.Sprintf("%s:%d", m.Container, m.ContainerPort)
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\n",
-				m.Group, m.Name, mpType, remoteOrBind, m.Status, m.ListenPort, target, m.StartedAt)
+			if mpType == "multipass" {
+				if m.Remote == "" {
+					remoteOrBind = m.BindHost
+				}
+				target = fmt.Sprintf("%s:%d", m.Instance, m.InstancePort)
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s/%d\t%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				m.Group, m.Name, mpType, remoteOrBind, m.Status, m.Health, m.ConsecutiveFailures, m.ListenPort, target, m.StartedAt, displayExpiry(m.ExpiresAt), displayInvalidReason(m.InvalidReason), strings.Join(m.Domains, ","), strings.NewReplacer("\n", " ", "\r", " ", "\t", " ").Replace(m.Description))
 		}
 		return w.Flush()
 	},
@@ -378,10 +427,67 @@ func apiDelete(url string) error {
 	return nil
 }
 
+var multipassCmd = &cobra.Command{Use: "multipass", Short: "Discover Multipass instances"}
+var multipassListCmd = &cobra.Command{
+	Use: "list", Short: "List Multipass instances, states and IPv4 addresses",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		resp, err := httpClient().Get(apiURL("/api/multipass/instances"))
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return fmt.Errorf("Multipass error (%d): %s", resp.StatusCode, body)
+		}
+		var instances []multipassclient.Instance
+		if err := json.NewDecoder(resp.Body).Decode(&instances); err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "NAME\tSTATE\tIPV4\tRELEASE")
+		for _, vm := range instances {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", vm.Name, vm.State, strings.Join(vm.IPv4, ","), vm.Release)
+		}
+		return w.Flush()
+	},
+}
+
+var describeCmd = &cobra.Command{Use: "describe <name> <description>", Short: "Set or clear a mapping description without restarting it", Args: cobra.ExactArgs(2), RunE: func(cmd *cobra.Command, args []string) error {
+	data, err := json.Marshal(map[string]string{"description": args[1]})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPut, apiURL("/api/mappings/"+url.PathEscape(args[0])+"/description?group="+url.QueryEscape(group)), bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("%s", body)
+	}
+	fmt.Fprintln(cmd.OutOrStdout(), string(body))
+	return nil
+}}
+
+var versionCmd = &cobra.Command{Use: "version", Short: "Show version and upgrade capabilities", RunE: func(cmd *cobra.Command, args []string) error {
+	return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]interface{}{"version": buildVersion, "config_version": 1, "domain_routing": true})
+}}
+var buildVersion = "dev"
+
 func init() {
 	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Data directory (default ~/.config/portmap)")
 	rootCmd.PersistentFlags().StringVar(&apiAddr, "api-addr", "127.0.0.1:9876", "API address")
 
+	serveCmd.Flags().StringVar(&webAddr, "web-addr", "127.0.0.1:9877", "Web console address (empty disables it)")
+	serveCmd.Flags().StringVar(&webCert, "web-cert", "", "TLS certificate for public web access")
+	serveCmd.Flags().StringVar(&webKey, "web-key", "", "TLS private key for public web access")
 	serveCmd.Flags().StringVar(&logFile, "log-file", "", "Log file path")
 	serveCmd.Flags().StringVar(&dockerHost, "docker-host", "", "Docker daemon host (e.g. unix:///var/run/docker.sock)")
 	serveCmd.Flags().StringVar(&dockerHelperImage, "docker-helper-image", "", "Docker helper image for port-forwarding")
@@ -396,27 +502,35 @@ func init() {
 	remoteAddCmd.Flags().StringVar(&authPhrase, "passphrase", "", "Key passphrase")
 	remoteAddCmd.MarkFlagRequired("host")
 
+	addCmd.Flags().StringVar(&addExpiresAt, "expires-at", "", "Expiry time in RFC3339 (default: no expiry)")
+	addCmd.Flags().StringSliceVar(&domainPrefixes, "domain", nil, "Domain prefix(es), e.g. portmap or app,api; HTTP services only")
+	addCmd.Flags().StringVar(&upstreamScheme, "upstream-scheme", "http", "Domain upstream protocol: http or https")
 	// add mapping flags
 	addCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
-	addCmd.Flags().StringVarP(&mappingType, "type", "t", "ssh", "Mapping type: 'ssh' or 'docker'")
+	addCmd.Flags().StringVarP(&mappingType, "type", "t", "ssh", "Mapping type: ssh, docker or multipass")
 	addCmd.Flags().StringVarP(&remoteName, "remote", "r", "", "Remote name (VPS, required for ssh)")
-	addCmd.Flags().IntVarP(&listenPort, "listen", "l", 0, "Listen port (VPS port for ssh, host port for docker)")
+	addCmd.Flags().IntVarP(&listenPort, "listen", "l", 0, "Listen port; omit for a random available 5-digit relay port")
 	addCmd.Flags().StringVar(&localHost, "local-host", "127.0.0.1", "Local target host (for ssh)")
 	addCmd.Flags().IntVarP(&localPort, "local-port", "p", 0, "Local target port (for ssh)")
 	addCmd.Flags().StringVar(&containerName, "container", "", "Target container name or ID (for docker)")
 	addCmd.Flags().IntVar(&containerPort, "container-port", 0, "Target container port (for docker)")
-	addCmd.Flags().StringVar(&bindHost, "bind-host", "127.0.0.1", "Host bind IP address (for docker)")
-	addCmd.MarkFlagRequired("listen")
+	addCmd.Flags().StringVar(&bindHost, "bind-host", "127.0.0.1", "Host bind IP address (for docker/multipass)")
+	addCmd.Flags().StringVar(&instanceName, "instance", "", "Multipass instance name")
+	addCmd.Flags().IntVar(&instancePort, "instance-port", 0, "Target TCP port inside the Multipass instance")
+	addCmd.Flags().StringVar(&description, "description", "", "What this mapping is used for")
+	describeCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 
 	deleteCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 	startCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 	stopCmd.Flags().StringVarP(&group, "group", "g", "default", "Group name")
 
+	multipassCmd.AddCommand(multipassListCmd)
 	dockerCmd.AddCommand(dockerListCmd)
 	groupCmd.AddCommand(groupStartCmd, groupStopCmd)
 	remoteCmd.AddCommand(remoteAddCmd, remoteDeleteCmd)
 
-	rootCmd.AddCommand(serveCmd, remoteCmd, addCmd, deleteCmd, listCmd, startCmd, stopCmd, groupCmd, dockerCmd)
+	rootCmd.AddCommand(versionCmd)
+	rootCmd.AddCommand(serveCmd, remoteCmd, addCmd, deleteCmd, listCmd, startCmd, stopCmd, groupCmd, dockerCmd, multipassCmd, describeCmd, renewCmd)
 }
 
 func main() {

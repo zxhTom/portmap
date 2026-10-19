@@ -665,8 +665,8 @@ func TestManager_StartFail_CloseFail_ThenStopRetry(t *testing.T) {
 func TestManager_Init_StalledDockerDaemon(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Use /private/tmp directly for Unix socket to avoid path length limits on macOS
-	sockDir, err := os.MkdirTemp("/private/tmp", "pm-stall-")
+	// Keep Unix socket paths short on both Linux and macOS.
+	sockDir, err := os.MkdirTemp("/tmp", "pm-stall-")
 	if err != nil {
 		t.Fatalf("MkdirTemp: %v", err)
 	}
@@ -745,7 +745,3 @@ func TestManager_Init_StalledDockerDaemon(t *testing.T) {
 
 	mgr.Shutdown()
 }
-
-
-
-

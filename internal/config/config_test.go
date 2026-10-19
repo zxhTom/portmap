@@ -196,3 +196,38 @@ func TestInstanceID_PersistenceAndLock(t *testing.T) {
 		t.Fatalf("expected persistent instance ID to match (%q vs %q)", id1, id2)
 	}
 }
+
+func TestRemoteAddrIPv6(t *testing.T) {
+	if got := (config.Remote{Host: "::1"}).Addr(); got != "[::1]:22" {
+		t.Fatalf("IPv6 remote address %q", got)
+	}
+}
+
+func TestMultipassMappingValidation(t *testing.T) {
+	valid := config.Mapping{Name: "vm-ssh", Type: config.TypeMultipass, Instance: "shell-test-vm", InstancePort: 22, ListenPort: 2222}
+	valid.SetDefaults()
+	if valid.BindHost != "127.0.0.1" {
+		t.Fatal("Multipass must bind to loopback by default")
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name   string
+		change func(*config.Mapping)
+	}{
+		{"missing-instance", func(m *config.Mapping) { m.Instance = "" }},
+		{"option-injection", func(m *config.Mapping) { m.Instance = "--all" }},
+		{"invalid-port", func(m *config.Mapping) { m.InstancePort = 65536 }},
+		{"missing-port", func(m *config.Mapping) { m.InstancePort = 0 }},
+		{"invalid-bind", func(m *config.Mapping) { m.BindHost = "bad-host" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := valid
+			tc.change(&m)
+			if err := m.Validate(); err == nil {
+				t.Fatal("invalid Multipass mapping accepted")
+			}
+		})
+	}
+}

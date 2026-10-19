@@ -1,6 +1,7 @@
 package sshclient
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 )
 
 type Tunnel struct {
+	domain     domainLease
 	RemoteName string
 	RemoteAddr string
 	ListenAddr string
@@ -37,10 +39,14 @@ type Tunnel struct {
 
 func NewTunnel(remote config.Remote, mapping config.Mapping) *Tunnel {
 	target := net.JoinHostPort(mapping.LocalHost, fmt.Sprintf("%d", mapping.LocalPort))
+	listenHost := "0.0.0.0"
+	if len(mapping.DomainPrefixes) > 0 {
+		listenHost = "127.0.0.1"
+	}
 	return &Tunnel{
 		RemoteName: remote.Name,
 		RemoteAddr: remote.Addr(),
-		ListenAddr: fmt.Sprintf("0.0.0.0:%d", mapping.ListenPort),
+		ListenAddr: net.JoinHostPort(listenHost, fmt.Sprint(mapping.ListenPort)),
 		TargetAddr: target,
 		remote:     remote,
 		mapping:    mapping,
@@ -94,9 +100,25 @@ func (t *Tunnel) Dial(remote config.Remote) error {
 	if remote.Port == 0 {
 		remote.Port = 22
 	}
-	addr := fmt.Sprintf("%s:%d", remote.Host, remote.Port)
+	addr := remote.Addr()
 
-	client, err := ssh.Dial("tcp", addr, cfg)
+	// Bound both TCP establishment and the SSH handshake.
+	conn, err := net.DialTimeout("tcp", addr, cfg.Timeout)
+	if err != nil {
+		t.setStatus(forward.StateFailed, fmt.Sprintf("ssh dial: %v", err))
+		return fmt.Errorf("ssh dial %s: %w", addr, err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg)
+	if err != nil {
+		_ = conn.Close()
+	} else {
+		_ = conn.SetDeadline(time.Time{})
+	}
+	var client *ssh.Client
+	if err == nil {
+		client = ssh.NewClient(c, chans, reqs)
+	}
 	if err != nil {
 		t.setStatus(forward.StateFailed, fmt.Sprintf("ssh dial: %v", err))
 		return fmt.Errorf("ssh dial %s: %w", addr, err)
@@ -112,29 +134,47 @@ func (t *Tunnel) Dial(remote config.Remote) error {
 	t.mu.Unlock()
 	slog.Info("ssh connected", "remote", remote.Name, "addr", addr)
 
+	_ = conn.SetDeadline(time.Now().Add(cfg.Timeout))
+	if len(t.mapping.DomainPrefixes) > 0 {
+		if err := t.reserveDomains(client); err != nil {
+			client.Close()
+			t.setStatus(forward.StateFailed, err.Error())
+			return err
+		}
+	}
 	ln, err := client.Listen("tcp", t.ListenAddr)
+	_ = conn.SetDeadline(time.Time{})
 	if err != nil {
 		t.mu.Lock()
 		t.client = nil
 		t.mu.Unlock()
 		client.Close()
 		t.setStatus(forward.StateFailed, fmt.Sprintf("listen on remote %s failed: %v", t.ListenAddr, err))
-		return fmt.Errorf("remote listen %s: %w", t.ListenAddr, err)
+		return fmt.Errorf("中转站端口 %d 不可用：已被占用或 SSH 转发策略禁止监听（%w）", t.mapping.ListenPort, err)
 	}
 
+	if len(t.mapping.DomainPrefixes) > 0 {
+		if err := t.activateDomains(client); err != nil {
+			client.Close()
+			ln.Close()
+			t.setStatus(forward.StateFailed, err.Error())
+			return err
+		}
+	}
 	t.mu.Lock()
 	if t.closed {
 		t.client = nil
 		t.mu.Unlock()
-		ln.Close()
 		client.Close()
+		ln.Close()
 		return fmt.Errorf("tunnel closed while listening")
 	}
 	t.ln = ln
 	t.status = forward.Status{State: forward.StateRunning}
+	closing := t.closing
 	t.mu.Unlock()
 
-	go t.serveAndSupervise(ln)
+	go t.serveAndSupervise(ln, client, closing)
 	return nil
 }
 
@@ -147,49 +187,55 @@ func (t *Tunnel) setStatus(state forward.State, errStr string) {
 	}
 }
 
-func (t *Tunnel) serveAndSupervise(initialLn net.Listener) {
-	ln := initialLn
+// Manager supervision establishes a fresh authenticated connection after failure.
+func (t *Tunnel) serveAndSupervise(ln net.Listener, client *ssh.Client, closing <-chan struct{}) {
+	done := make(chan struct{})
+	defer close(done)
+	go t.keepAlive(client, closing, done)
+	if len(t.mapping.DomainPrefixes) > 0 {
+		go t.renewDomains(client, closing, done)
+	}
+	err := t.serve(ln)
+	_ = client.Close()
+	_ = ln.Close()
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if !t.closed && t.client == client {
+		t.status = forward.Status{State: forward.StateFailed, Error: fmt.Sprintf("SSH connection lost: %v", err)}
+	}
+}
+
+func (t *Tunnel) keepAlive(client *ssh.Client, closing, done <-chan struct{}) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
 	for {
-		err := t.serve(ln)
-		if ln != nil {
-			ln.Close()
-		}
-
 		select {
-		case <-t.closing:
+		case <-closing:
 			return
-		default:
-		}
-
-		t.setStatus(forward.StateFailed, fmt.Sprintf("remote listener disconnected: %v", err))
-		slog.Warn("listener closed, attempting reconnection", "addr", t.ListenAddr, "err", err)
-
-		// Wait before retrying
-		select {
-		case <-t.closing:
+		case <-done:
 			return
-		case <-time.After(2 * time.Second):
+		case <-ticker.C:
+			result := make(chan error, 1)
+			go func() { _, _, err := client.SendRequest("keepalive@openssh.com", true, nil); result <- err }()
+			timer := time.NewTimer(5 * time.Second)
+			select {
+			case <-closing:
+				timer.Stop()
+				return
+			case <-done:
+				timer.Stop()
+				return
+			case err := <-result:
+				timer.Stop()
+				if err != nil {
+					_ = client.Close()
+					return
+				}
+			case <-timer.C:
+				_ = client.Close()
+				return
+			}
 		}
-
-		t.mu.Lock()
-		client := t.client
-		t.mu.Unlock()
-
-		if client == nil {
-			return
-		}
-
-		newLn, err := client.Listen("tcp", t.ListenAddr)
-		if err != nil {
-			t.setStatus(forward.StateFailed, fmt.Sprintf("remote listen failed: %v", err))
-			continue
-		}
-
-		t.mu.Lock()
-		t.ln = newLn
-		t.status = forward.Status{State: forward.StateRunning}
-		t.mu.Unlock()
-		ln = newLn
 	}
 }
 
@@ -235,11 +281,18 @@ func (t *Tunnel) Close() error {
 	t.status = forward.Status{State: forward.StateStopped}
 	t.mu.Unlock()
 
-	if ln != nil {
-		_ = ln.Close()
+	if client != nil && len(t.mapping.DomainPrefixes) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		requestRelay(ctx, client, t.domainRequest("deactivate"))
+		cancel()
 	}
+	// Close the transport first: listener cancellation waits for a remote reply
+	// and must not block shutdown when the peer is unresponsive.
 	if client != nil {
 		_ = client.Close()
+	}
+	if ln != nil {
+		_ = ln.Close()
 	}
 	return nil
 }
@@ -289,4 +342,21 @@ func loadKnownHosts() (ssh.HostKeyCallback, error) {
 		return nil, err
 	}
 	return knownhosts.New(filepath.Join(home, ".ssh", "known_hosts"))
+}
+
+// Check verifies both the destination and the public relay listener.
+func (t *Tunnel) Check(ctx context.Context) error {
+	if len(t.mapping.DomainPrefixes) > 0 {
+		if err := forward.CheckTCP(ctx, t.TargetAddr); err != nil {
+			return err
+		}
+		t.mu.Lock()
+		client := t.client
+		t.mu.Unlock()
+		if client == nil {
+			return fmt.Errorf("SSH connection unavailable")
+		}
+		return t.renewDomainLease(ctx, client)
+	}
+	return forward.CheckTCP(ctx, t.TargetAddr, net.JoinHostPort(t.remote.Host, fmt.Sprint(t.mapping.ListenPort)))
 }

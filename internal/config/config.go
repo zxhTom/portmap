@@ -5,16 +5,20 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"github.com/zxhtom/portmap/internal/relayprotocol"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 const (
-	TypeSSH    = "ssh"
-	TypeDocker = "docker"
+	TypeSSH       = "ssh"
+	TypeDocker    = "docker"
+	TypeMultipass = "multipass"
 
 	DefaultDockerHost        = "unix:///var/run/docker.sock"
 	DefaultDockerHelperImage = "ghcr.io/iammathew/docker-port-forward/sidecar:latest"
@@ -29,6 +33,7 @@ type AuthConfig struct {
 }
 
 type Remote struct {
+	DomainZone string     `json:"domain_zone,omitempty"`
 	Name       string     `json:"name"`
 	Host       string     `json:"host"`
 	Port       int        `json:"port"`
@@ -38,10 +43,11 @@ type Remote struct {
 }
 
 func (r Remote) Addr() string {
-	if r.Port == 0 {
-		return r.Host + ":22"
+	port := r.Port
+	if port == 0 {
+		port = 22
 	}
-	return fmt.Sprintf("%s:%d", r.Host, r.Port)
+	return net.JoinHostPort(r.Host, strconv.Itoa(port))
 }
 
 type DockerConfig struct {
@@ -50,18 +56,29 @@ type DockerConfig struct {
 }
 
 type Mapping struct {
-	Name          string `json:"name"`
-	Type          string `json:"type,omitempty"`
-	ListenPort    int    `json:"listen_port"`
-	LocalHost     string `json:"local_host,omitempty"`
-	LocalPort     int    `json:"local_port,omitempty"`
-	Remote        string `json:"remote,omitempty"`
-	Container     string `json:"container,omitempty"`
-	ContainerPort int    `json:"container_port,omitempty"`
-	BindHost      string `json:"bind_host,omitempty"`
+	DomainPrefixes []string `json:"domain_prefixes,omitempty"`
+	UpstreamScheme string   `json:"upstream_scheme,omitempty"`
+	DomainOwner    string   `json:"-"`
+	ExpiresAt      string   `json:"expires_at,omitempty"`
+	Description    string   `json:"description,omitempty"`
+	Name           string   `json:"name"`
+	Type           string   `json:"type,omitempty"`
+	ListenPort     int      `json:"listen_port"`
+	LocalHost      string   `json:"local_host,omitempty"`
+	LocalPort      int      `json:"local_port,omitempty"`
+	Remote         string   `json:"remote,omitempty"`
+	Container      string   `json:"container,omitempty"`
+	ContainerPort  int      `json:"container_port,omitempty"`
+	BindHost       string   `json:"bind_host,omitempty"`
+	Instance       string   `json:"instance,omitempty"`
+	InstancePort   int      `json:"instance_port,omitempty"`
 }
 
-func (m *Mapping) EffectiveType() string {
+func (m Mapping) UsesRelay() bool {
+	return m.EffectiveType() == TypeSSH || (m.EffectiveType() == TypeMultipass && m.Remote != "")
+}
+
+func (m Mapping) EffectiveType() string {
 	if m.Type == "" {
 		return TypeSSH
 	}
@@ -69,7 +86,13 @@ func (m *Mapping) EffectiveType() string {
 }
 
 func (m *Mapping) SetDefaults() {
-	if m.EffectiveType() == TypeDocker {
+	if len(m.DomainPrefixes) > 0 && m.UpstreamScheme == "" {
+		m.UpstreamScheme = "http"
+	}
+	for i := range m.DomainPrefixes {
+		m.DomainPrefixes[i] = strings.ToLower(strings.TrimSpace(m.DomainPrefixes[i]))
+	}
+	if m.EffectiveType() == TypeDocker || m.EffectiveType() == TypeMultipass {
 		if m.BindHost == "" {
 			m.BindHost = DefaultBindHost
 		}
@@ -80,7 +103,31 @@ func (m *Mapping) SetDefaults() {
 	}
 }
 
+func (m Mapping) Expired(now time.Time) bool {
+	if m.ExpiresAt == "" {
+		return false
+	}
+	until, err := time.Parse(time.RFC3339Nano, m.ExpiresAt)
+	return err != nil || !now.Before(until)
+}
+
 func (m Mapping) Validate() error {
+	if len(m.DomainPrefixes) > 0 {
+		if !m.UsesRelay() {
+			return fmt.Errorf("域名模式需要 SSH 中转站")
+		}
+		if _, err := relayprotocol.Normalize(m.DomainPrefixes); err != nil {
+			return err
+		}
+		if m.UpstreamScheme != "http" && m.UpstreamScheme != "https" {
+			return fmt.Errorf("域名模式的后端协议须为 http 或 https")
+		}
+	}
+	if m.ExpiresAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, m.ExpiresAt); err != nil {
+			return fmt.Errorf("expires_at must be RFC3339 with timezone: %w", err)
+		}
+	}
 	if m.Name == "" {
 		return fmt.Errorf("mapping name is required")
 	}
@@ -117,8 +164,19 @@ func (m Mapping) Validate() error {
 			return fmt.Errorf("bind_host must be a valid IP address, got %q", m.BindHost)
 		}
 		return nil
+	case TypeMultipass:
+		if !ValidInstanceName(m.Instance) {
+			return fmt.Errorf("instance must be a Multipass instance name (letters, digits and hyphens)")
+		}
+		if m.InstancePort < 1 || m.InstancePort > 65535 {
+			return fmt.Errorf("instance_port must be between 1 and 65535")
+		}
+		if net.ParseIP(m.BindHost) == nil {
+			return fmt.Errorf("bind_host must be a valid IP address")
+		}
+		return nil
 	default:
-		return fmt.Errorf("unknown mapping type %q (must be %q or %q)", m.Type, TypeSSH, TypeDocker)
+		return fmt.Errorf("unknown mapping type %q (must be %q, %q or %q)", m.Type, TypeSSH, TypeDocker, TypeMultipass)
 	}
 }
 
@@ -128,9 +186,10 @@ type Group struct {
 }
 
 type Config struct {
-	Docker  DockerConfig `json:"docker,omitempty"`
-	Remotes []Remote     `json:"remotes"`
-	Groups  []Group      `json:"groups"`
+	DomainZone string       `json:"domain_zone,omitempty"`
+	Docker     DockerConfig `json:"docker,omitempty"`
+	Remotes    []Remote     `json:"remotes"`
+	Groups     []Group      `json:"groups"`
 }
 
 func DefaultConfig() Config {
@@ -143,8 +202,12 @@ func DefaultConfig() Config {
 }
 
 type MappingState struct {
-	Running   bool   `json:"running"`
-	StartedAt string `json:"started_at,omitempty"`
+	Failures   int    `json:"consecutive_failures,omitempty"`
+	Invalid    bool   `json:"invalid,omitempty"`
+	CheckedAt  string `json:"checked_at,omitempty"`
+	CheckError string `json:"check_error,omitempty"`
+	Running    bool   `json:"running"`
+	StartedAt  string `json:"started_at,omitempty"`
 }
 
 type State struct {
@@ -276,4 +339,17 @@ func AcquireInstanceLock(dir string) (string, *InstanceLock, error) {
 	}
 
 	return instanceID, &InstanceLock{file: lockFile, path: lockPath}, nil
+}
+
+// ValidInstanceName also prevents names from being interpreted as CLI options.
+func ValidInstanceName(name string) bool {
+	if name == "" || !((name[0] >= 'a' && name[0] <= 'z') || (name[0] >= 'A' && name[0] <= 'Z')) {
+		return false
+	}
+	for _, c := range name {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+			return false
+		}
+	}
+	return true
 }

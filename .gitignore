@@ -2,3 +2,7 @@
 *.tmp
 .idea/
 .vscode/
+
+# Local web administrator credentials
+web-auth.json
+web-initial-password

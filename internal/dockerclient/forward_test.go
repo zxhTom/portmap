@@ -92,128 +92,144 @@ func TestDockerClient_RollbackErrorHandling(t *testing.T) {
 }
 
 func TestDockerClient_Forward_LifecycleAndFailureMonitoring(t *testing.T) {
-	var targetRunning = true
-	var helperRunning = true
-	var mu sync.Mutex
+	for _, scenario := range []string{"helper-stop", "target-stop", "target-replaced", "address-changed"} {
+		t.Run(scenario, func(t *testing.T) {
+			var targetRunning = true
+			var helperRunning = true
+			targetID := "target-live"
+			targetIP := "172.20.0.15"
+			var mu sync.Mutex
 
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/containers/target-live/json"):
-			mu.Lock()
-			tr := targetRunning
-			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(types.ContainerJSON{
-				ContainerJSONBase: &types.ContainerJSONBase{
-					ID:    "target-live",
-					State: &types.ContainerState{Running: tr},
-				},
-				NetworkSettings: &types.NetworkSettings{
-					Networks: map[string]*network.EndpointSettings{
-						"dummy-net": {
-							NetworkID: "net-live",
-							IPAddress: "172.20.0.15",
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/containers/target-live/json"):
+					mu.Lock()
+					tr := targetRunning
+					id, ip := targetID, targetIP
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(types.ContainerJSON{
+						ContainerJSONBase: &types.ContainerJSONBase{
+							ID:    id,
+							State: &types.ContainerState{Running: tr},
 						},
-					},
-				},
-			})
-		case strings.HasSuffix(r.URL.Path, "/containers/helper-live/json"):
+						NetworkSettings: &types.NetworkSettings{
+							Networks: map[string]*network.EndpointSettings{
+								"dummy-net": {
+									NetworkID: "net-live",
+									IPAddress: ip,
+								},
+							},
+						},
+					})
+				case strings.HasSuffix(r.URL.Path, "/containers/helper-live/json"):
+					mu.Lock()
+					hr := helperRunning
+					mu.Unlock()
+					_ = json.NewEncoder(w).Encode(types.ContainerJSON{
+						ContainerJSONBase: &types.ContainerJSONBase{
+							ID:    "helper-live",
+							State: &types.ContainerState{Running: hr},
+						},
+					})
+				case strings.HasSuffix(r.URL.Path, "/images/json"):
+					_ = json.NewEncoder(w).Encode([]image.Summary{{ID: "img-live"}})
+				case strings.HasSuffix(r.URL.Path, "/networks/create"):
+					_ = json.NewEncoder(w).Encode(network.CreateResponse{ID: "net-live"})
+				case strings.HasSuffix(r.URL.Path, "/networks/net-live/connect"):
+					_ = json.NewEncoder(w).Encode(map[string]string{})
+				case strings.HasSuffix(r.URL.Path, "/containers/create"):
+					_ = json.NewEncoder(w).Encode(container.CreateResponse{ID: "helper-live"})
+				case strings.HasSuffix(r.URL.Path, "/containers/helper-live/start"):
+					_ = json.NewEncoder(w).Encode(map[string]string{})
+				case strings.HasSuffix(r.URL.Path, "/containers/helper-live/stop"):
+					_ = json.NewEncoder(w).Encode(map[string]string{})
+				case strings.HasSuffix(r.URL.Path, "/containers/helper-live") && r.Method == http.MethodDelete:
+					_ = json.NewEncoder(w).Encode(map[string]string{})
+				case strings.HasSuffix(r.URL.Path, "/networks/net-live/disconnect"):
+					_ = json.NewEncoder(w).Encode(map[string]string{})
+				case strings.HasSuffix(r.URL.Path, "/networks/net-live") && r.Method == http.MethodDelete:
+					_ = json.NewEncoder(w).Encode(map[string]string{})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer ts.Close()
+
+			cli, err := client.NewClientWithOpts(
+				client.WithHost(ts.URL),
+				client.WithHTTPClient(ts.Client()),
+				client.WithVersion("1.45"),
+			)
+			if err != nil {
+				t.Fatalf("NewClientWithOpts: %v", err)
+			}
+
+			dClient := dockerclient.NewWithClient(cli, "inst-fwd")
+
+			// Get a free localhost port
+			testLn, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatalf("listen: %v", err)
+			}
+			freePort := testLn.Addr().(*net.TCPAddr).Port
+			_ = testLn.Close()
+
+			mapping := config.Mapping{
+				Name:          "fwd-map",
+				Type:          config.TypeDocker,
+				Container:     "target-live",
+				ContainerPort: 80,
+				ListenPort:    freePort,
+				BindHost:      "127.0.0.1",
+			}
+
+			fwd := dockerclient.NewForward(dClient, mapping, "test-g", "inst-fwd", "img-live")
+			if fwd.Status().State != forward.StateStopped {
+				t.Fatalf("expected initial state stopped, got: %s", fwd.Status().State)
+			}
+
+			if err := fwd.Start(); err != nil {
+				t.Fatalf("fwd.Start failed: %v", err)
+			}
+			if fwd.Status().State != forward.StateRunning {
+				t.Fatalf("expected state running, got: %s", fwd.Status().State)
+			}
+
+			// Simulate helper abnormal stop
 			mu.Lock()
-			hr := helperRunning
+			switch scenario {
+			case "helper-stop":
+				helperRunning = false
+			case "target-stop":
+				targetRunning = false
+			case "target-replaced":
+				targetID = "replacement-id"
+			case "address-changed":
+				targetIP = "172.20.0.16"
+			}
 			mu.Unlock()
-			_ = json.NewEncoder(w).Encode(types.ContainerJSON{
-				ContainerJSONBase: &types.ContainerJSONBase{
-					ID:    "helper-live",
-					State: &types.ContainerState{Running: hr},
-				},
-			})
-		case strings.HasSuffix(r.URL.Path, "/images/json"):
-			_ = json.NewEncoder(w).Encode([]image.Summary{{ID: "img-live"}})
-		case strings.HasSuffix(r.URL.Path, "/networks/create"):
-			_ = json.NewEncoder(w).Encode(network.CreateResponse{ID: "net-live"})
-		case strings.HasSuffix(r.URL.Path, "/networks/net-live/connect"):
-			_ = json.NewEncoder(w).Encode(map[string]string{})
-		case strings.HasSuffix(r.URL.Path, "/containers/create"):
-			_ = json.NewEncoder(w).Encode(container.CreateResponse{ID: "helper-live"})
-		case strings.HasSuffix(r.URL.Path, "/containers/helper-live/start"):
-			_ = json.NewEncoder(w).Encode(map[string]string{})
-		case strings.HasSuffix(r.URL.Path, "/containers/helper-live/stop"):
-			_ = json.NewEncoder(w).Encode(map[string]string{})
-		case strings.HasSuffix(r.URL.Path, "/containers/helper-live") && r.Method == http.MethodDelete:
-			_ = json.NewEncoder(w).Encode(map[string]string{})
-		case strings.HasSuffix(r.URL.Path, "/networks/net-live/disconnect"):
-			_ = json.NewEncoder(w).Encode(map[string]string{})
-		case strings.HasSuffix(r.URL.Path, "/networks/net-live") && r.Method == http.MethodDelete:
-			_ = json.NewEncoder(w).Encode(map[string]string{})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer ts.Close()
 
-	cli, err := client.NewClientWithOpts(
-		client.WithHost(ts.URL),
-		client.WithHTTPClient(ts.Client()),
-		client.WithVersion("1.45"),
-	)
-	if err != nil {
-		t.Fatalf("NewClientWithOpts: %v", err)
-	}
+			// Wait for monitorLifecycle to detect failure
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if fwd.Status().State == forward.StateFailed {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			if fwd.Status().State != forward.StateFailed {
+				t.Fatalf("expected state to turn failed after helper stopped, got: %s", fwd.Status().State)
+			}
 
-	dClient := dockerclient.NewWithClient(cli, "inst-fwd")
-
-	// Get a free localhost port
-	testLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	freePort := testLn.Addr().(*net.TCPAddr).Port
-	_ = testLn.Close()
-
-	mapping := config.Mapping{
-		Name:          "fwd-map",
-		Type:          config.TypeDocker,
-		Container:     "target-live",
-		ContainerPort: 80,
-		ListenPort:    freePort,
-		BindHost:      "127.0.0.1",
-	}
-
-	fwd := dockerclient.NewForward(dClient, mapping, "test-g", "inst-fwd", "img-live")
-	if fwd.Status().State != forward.StateStopped {
-		t.Fatalf("expected initial state stopped, got: %s", fwd.Status().State)
-	}
-
-	if err := fwd.Start(); err != nil {
-		t.Fatalf("fwd.Start failed: %v", err)
-	}
-	if fwd.Status().State != forward.StateRunning {
-		t.Fatalf("expected state running, got: %s", fwd.Status().State)
-	}
-
-	// Simulate helper abnormal stop
-	mu.Lock()
-	helperRunning = false
-	mu.Unlock()
-
-	// Wait for monitorLifecycle to detect failure
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if fwd.Status().State == forward.StateFailed {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if fwd.Status().State != forward.StateFailed {
-		t.Fatalf("expected state to turn failed after helper stopped, got: %s", fwd.Status().State)
-	}
-
-	// Idempotent Close
-	if err := fwd.Close(); err != nil {
-		t.Fatalf("Close failed: %v", err)
-	}
-	if fwd.Status().State != forward.StateStopped {
-		t.Fatalf("expected state stopped after Close, got: %s", fwd.Status().State)
+			// Idempotent Close
+			if err := fwd.Close(); err != nil {
+				t.Fatalf("Close failed: %v", err)
+			}
+			if fwd.Status().State != forward.StateStopped {
+				t.Fatalf("expected state stopped after Close, got: %s", fwd.Status().State)
+			}
+		})
 	}
 }
 
@@ -791,6 +807,3 @@ func TestDockerClient_ControlledAttachFailure_NoFallback(t *testing.T) {
 		t.Fatalf("expected NO fallback ContainerExecAttach/exec-start when ControlledAttach fails")
 	}
 }
-
-
-

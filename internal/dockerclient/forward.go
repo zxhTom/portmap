@@ -289,10 +289,26 @@ func (f *Forward) monitorLifecycle() {
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 
-			targetInspect, err := cli.ContainerInspect(ctx, targetID)
+			targetInspect, err := cli.ContainerInspect(ctx, f.mapping.Container)
 			if err != nil || targetInspect.State == nil || !targetInspect.State.Running {
 				cancel()
 				f.handleFailure("target container stopped or unavailable")
+				return
+			}
+
+			// A stable container name can now refer to a replacement container.
+			// Also detect loss/change of the dedicated network address.
+			networkOK := false
+			if targetInspect.NetworkSettings != nil {
+				for _, endpoint := range targetInspect.NetworkSettings.Networks {
+					if endpoint != nil && endpoint.NetworkID == f.resMgr.NetworkID() && endpoint.IPAddress == f.resMgr.TargetIP() {
+						networkOK = true
+					}
+				}
+			}
+			if targetInspect.ID != targetID || !networkOK {
+				cancel()
+				f.handleFailure("target container replaced or forwarding network changed")
 				return
 			}
 
@@ -358,4 +374,43 @@ func (f *Forward) Close() error {
 	}
 
 	return f.resMgr.Rollback()
+}
+
+// Check probes the listener and makes a TCP connection from the helper namespace
+// to the target. No application request is sent.
+func (f *Forward) Check(ctx context.Context) error {
+	host := f.mapping.BindHost
+	if host == "0.0.0.0" || host == "::" || host == "" {
+		host = "127.0.0.1"
+	}
+	if err := forward.CheckTCP(ctx, net.JoinHostPort(host, strconv.Itoa(f.mapping.ListenPort))); err != nil {
+		return err
+	}
+	cli := f.client.CommonClient()
+	exec, err := cli.ContainerExecCreate(ctx, f.resMgr.HelperID(), container.ExecOptions{Cmd: []string{"socat", "-u", "/dev/null", fmt.Sprintf("TCP-CONNECT:%s:%d,connect-timeout=3", f.resMgr.TargetIP(), f.mapping.ContainerPort)}})
+	if err != nil {
+		return err
+	}
+	if err := cli.ContainerExecStart(ctx, exec.ID, container.ExecStartOptions{Detach: true}); err != nil {
+		return err
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			state, err := cli.ContainerExecInspect(ctx, exec.ID)
+			if err != nil {
+				return err
+			}
+			if !state.Running {
+				if state.ExitCode != 0 {
+					return fmt.Errorf("target TCP check exited %d", state.ExitCode)
+				}
+				return nil
+			}
+		}
+	}
 }
