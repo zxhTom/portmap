@@ -22,6 +22,7 @@ import (
 
 	"github.com/zxhtom/portmap/internal/config"
 	"github.com/zxhtom/portmap/internal/manager"
+	"github.com/zxhtom/portmap/internal/websession"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -44,7 +45,7 @@ type Server struct {
 	mu       sync.Mutex
 	dir      string
 	creds    credentials
-	sessions map[[32]byte]session
+	sm       *websession.Manager
 	attempts map[string]attempt
 	api      http.Handler
 	mgr      *manager.Manager
@@ -81,7 +82,7 @@ func writePrivate(path string, data []byte) error {
 }
 
 func New(mgr *manager.Manager, api http.Handler) (*Server, error) {
-	s := &Server{dir: mgr.DataDir(), mgr: mgr, api: api, sessions: make(map[[32]byte]session), attempts: make(map[string]attempt)}
+	s := &Server{dir: mgr.DataDir(), mgr: mgr, api: api, attempts: make(map[string]attempt)}
 	path := filepath.Join(s.dir, "web-auth.json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -112,6 +113,12 @@ func New(mgr *manager.Manager, api http.Handler) (*Server, error) {
 	if _, err := bcrypt.Cost([]byte(s.creds.Hash)); err != nil {
 		return nil, fmt.Errorf("invalid web password hash")
 	}
+	fp := websession.CredentialFingerprint(s.creds.Username, s.creds.Hash)
+	sm, err := websession.New(filepath.Join(s.dir, "web-remember-sessions.json"), fp)
+	if err != nil {
+		return nil, fmt.Errorf("init web session manager: %w", err)
+	}
+	s.sm = sm
 	return s, nil
 }
 
@@ -150,20 +157,12 @@ func (s *Server) cookieName(r *http.Request) string {
 	digest := sha256.Sum256([]byte(strings.ToLower(r.Host)))
 	return "portmap_" + hex.EncodeToString(digest[:6])
 }
-func (s *Server) authenticated(r *http.Request) (session, bool) {
+func (s *Server) authenticated(r *http.Request) (websession.Session, bool) {
 	c, err := r.Cookie(s.cookieName(r))
 	if err != nil {
-		return session{}, false
+		return websession.Session{}, false
 	}
-	key := sha256.Sum256([]byte(c.Value))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.sessions[key]
-	if !ok || !time.Now().Before(v.Expires) {
-		delete(s.sessions, key)
-		return session{}, false
-	}
-	return v, true
+	return s.sm.Get(c.Value)
 }
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -232,10 +231,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			fail(w, 405, "method not allowed")
 			return
 		}
-		c, _ := r.Cookie(s.cookieName(r))
-		s.mu.Lock()
-		delete(s.sessions, sha256.Sum256([]byte(c.Value)))
-		s.mu.Unlock()
+		if c, err := r.Cookie(s.cookieName(r)); err == nil {
+			if err := s.sm.Delete(c.Value); err != nil {
+				fail(w, 500, "退出失败，请稍后重试")
+				return
+			}
+		}
 		http.SetCookie(w, &http.Cookie{Name: s.cookieName(r), Value: "", Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		jsonResponse(w, 200, map[string]bool{"ok": true})
 	case "/auth/password":
@@ -280,8 +281,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		RememberMe bool   `json:"remember_me"`
 	}
 	if err := decode(w, r, &req); err != nil || len(req.Password) > 72 {
 		fail(w, 400, "请输入有效的账号和密码")
@@ -289,7 +291,6 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := time.Now()
 	for key, a := range s.attempts {
 		if now.Sub(a.Since) > 15*time.Minute {
@@ -298,11 +299,13 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	a := s.attempts[ip]
 	if a.Count >= 5 {
+		s.mu.Unlock()
 		w.Header().Set("Retry-After", "900")
 		fail(w, 429, "尝试次数过多，请 15 分钟后重试")
 		return
 	}
 	if len(s.attempts) > 1024 {
+		s.mu.Unlock()
 		fail(w, 429, "请稍后重试")
 		return
 	}
@@ -313,31 +316,31 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 		a.Count++
 		s.attempts[ip] = a
+		s.mu.Unlock()
 		fail(w, 401, "账号或密码不正确")
 		return
 	}
 	delete(s.attempts, ip)
-	for key, v := range s.sessions {
-		if !now.Before(v.Expires) {
-			delete(s.sessions, key)
+	token, _, _, maxAge, err := s.sm.CreateSession(req.RememberMe)
+	s.mu.Unlock()
+	if err != nil {
+		if err.Error() == "too many active sessions" {
+			fail(w, 429, "登录会话过多，请稍后重试")
+			return
 		}
-	}
-	if len(s.sessions) >= 32 {
-		fail(w, 429, "登录会话过多，请稍后重试")
-		return
-	}
-	token, err := randomToken()
-	if err != nil {
 		fail(w, 500, "无法创建会话")
 		return
 	}
-	csrf, err := randomToken()
-	if err != nil {
-		fail(w, 500, "无法创建会话")
-		return
-	}
-	s.sessions[sha256.Sum256([]byte(token))] = session{Expires: now.Add(12 * time.Hour), CSRF: csrf}
-	http.SetCookie(w, &http.Cookie{Name: s.cookieName(r), Value: token, Path: "/", HttpOnly: true, Secure: r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: 12 * 3600})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     s.cookieName(r),
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   maxAge,
+	})
 	jsonResponse(w, 200, map[string]bool{"ok": true})
 }
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
@@ -361,13 +364,19 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	next := credentials{Username: s.creds.Username, Hash: string(hash)}
+	nextFp := websession.CredentialFingerprint(next.Username, next.Hash)
+	oldFp := websession.CredentialFingerprint(s.creds.Username, s.creds.Hash)
+	if err := s.sm.UpdateFingerprint(nextFp); err != nil {
+		fail(w, 500, "无法更新会话")
+		return
+	}
 	data, _ := json.MarshalIndent(next, "", "  ")
 	if err := writePrivate(filepath.Join(s.dir, "web-auth.json"), data); err != nil {
+		_ = s.sm.UpdateFingerprint(oldFp)
 		fail(w, 500, "无法保存密码")
 		return
 	}
 	s.creds = next
-	s.sessions = make(map[[32]byte]session)
 	os.Remove(filepath.Join(s.dir, "web-initial-password"))
 	jsonResponse(w, 200, map[string]bool{"ok": true})
 }

@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/zxhtom/portmap/internal/api"
 	"github.com/zxhtom/portmap/internal/config"
@@ -166,12 +165,7 @@ func TestPasswordChangeInvalidatesSessionsAndPersists(t *testing.T) {
 func TestRateLimitAndSessionExpiry(t *testing.T) {
 	s, pw := fixture(t)
 	c, _ := loginTest(t, s, pw)
-	s.mu.Lock()
-	for key, v := range s.sessions {
-		v.Expires = time.Now().Add(-time.Second)
-		s.sessions[key] = v
-	}
-	s.mu.Unlock()
+	_ = s.sm.Reset()
 	if w := call(s, "GET", "/auth/session", nil, c, "", ""); w.Code != 401 {
 		t.Fatal("expired session accepted")
 	}
@@ -235,5 +229,61 @@ func TestCookieNamespacesKeepForwardedConsolesIndependent(t *testing.T) {
 	}
 	if w := call(s, "GET", "/auth/session", nil, cookie, "", ""); w.Code != 200 {
 		t.Fatal("other console invalidated original session")
+	}
+}
+
+func TestLoginClearsRateLimitAttemptsOnSuccess(t *testing.T) {
+	s, pw := fixture(t)
+	// 4次失败尝试
+	for i := 0; i < 4; i++ {
+		w := call(s, "POST", "/auth/login", map[string]string{"username": "admin", "password": "wrong"}, nil, "", "http://localhost")
+		if w.Code != 401 {
+			t.Fatalf("expected 401, got %d", w.Code)
+		}
+	}
+	// 正确密码登录成功
+	w := call(s, "POST", "/auth/login", map[string]string{"username": "admin", "password": pw}, nil, "", "http://localhost")
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	// 验证 attempts 已清空，还可以再错 4 次而不被 429
+	for i := 0; i < 4; i++ {
+		w := call(s, "POST", "/auth/login", map[string]string{"username": "admin", "password": "wrong"}, nil, "", "http://localhost")
+		if w.Code != 401 {
+			t.Fatalf("expected 401 after reset, got %d", w.Code)
+		}
+	}
+}
+
+func TestPasswordChangeRollbackConsistency(t *testing.T) {
+	s, pw := fixture(t)
+	c, csrf := loginTest(t, s, pw)
+
+	// 把 web-auth.json 设为只读或目录锁住写，模拟 writePrivate 失败
+	authFile := filepath.Join(s.dir, "web-auth.json")
+	origBytes, _ := os.ReadFile(authFile)
+	// 将父目录设为只读以使 os.CreateTemp 失败
+	_ = os.Chmod(s.dir, 0500)
+	defer os.Chmod(s.dir, 0700)
+
+	// 尝试改密码，应返回 500
+	w := call(s, "PUT", "/auth/password", map[string]string{"current_password": pw, "new_password": "brand-new-password-1234"}, c, csrf, "http://localhost")
+	if w.Code != 500 {
+		t.Fatalf("expected 500 when disk write fails, got %d", w.Code)
+	}
+
+	// 恢复目录权限
+	_ = os.Chmod(s.dir, 0700)
+	afterBytes, _ := os.ReadFile(authFile)
+	if string(origBytes) != string(afterBytes) {
+		t.Fatalf("web-auth.json should remain unchanged after failure")
+	}
+
+	// 验证内存中 creds 没有被篡改分裂，旧密码仍可以验证
+	s.mu.Lock()
+	memHash := s.creds.Hash
+	s.mu.Unlock()
+	if !strings.Contains(string(origBytes), memHash) {
+		t.Fatalf("memory creds desynced from disk web-auth.json")
 	}
 }

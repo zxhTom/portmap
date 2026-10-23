@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Portmap 服务端</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Portmap 服务端</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body>
 <header><strong>portmap<span class="dot">.</span></strong><span>服务端 · 中转站视图</span><button id="logout" hidden>退出</button></header>
 <main>
-<section id="login" class="card" hidden><h1>登录中转站</h1><p>查看和禁用经过此 VPS 的映射。</p><form id="login-form"><label>账号<input name="username" autocomplete="username" value="admin" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><p id="login-error" class="error"></p><button type="submit">登录</button></form></section>
+<section id="login" class="card" hidden><h1>登录中转站</h1><p>查看和禁用经过此 VPS 的映射。</p><form id="login-form"><label>账号<input name="username" autocomplete="username" value="admin" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><label class="remember-row"><input type="checkbox" name="remember_me"> 记住登录 30 天</label><p id="login-error" class="error"></p><button type="submit">登录</button></form></section>
 <section id="dashboard" hidden><div class="heading"><div><h1>映射总览</h1><p>客户端定期上报；状态超过 45 秒未更新会显示离线。此处可禁用或重新启用映射，不能创建隧道。</p></div><button id="refresh">刷新</button></div><div id="summary" class="summary"></div><div class="table-wrap"><table><thead><tr><th>客户端 / 映射</th><th>VPS 入口</th><th>客户端目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" hidden>还没有客户端上报映射。客户端启动或更新后会自动同步。</p><p id="notice" class="error"></p></section>
 </main>
 </body></html>

@@ -31,7 +31,7 @@ function render(records){
  }
 }
 async function refresh(){try{render(await request('/api/tunnels'));$('#notice').textContent='';}catch(e){$('#notice').textContent=e.message;if(e.message==='请先登录'){session=null;view(false);}}}
-$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const data=new FormData(form);$('#login-error').textContent='';try{await request('/auth/login','POST',{username:data.get('username'),password:data.get('password')});session=await request('/auth/session');form.reset();view(true);await refresh();}catch(e){$('#login-error').textContent=e.message;}});
+$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const data=new FormData(form);$('#login-error').textContent='';try{await request('/auth/login','POST',{username:data.get('username'),password:data.get('password'),remember_me:form.querySelector('input[name="remember_me"]')?.checked||false});session=await request('/auth/session');form.reset();view(true);await refresh();}catch(e){$('#login-error').textContent=e.message;}});
 $('#refresh').addEventListener('click',refresh);
 $('#logout').addEventListener('click',async()=>{try{await request('/auth/logout','POST');}finally{session=null;view(false);}});
 (async()=>{try{session=await request('/auth/session');view(true);await refresh();}catch{view(false);}})();

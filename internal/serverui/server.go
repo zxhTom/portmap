@@ -3,7 +3,6 @@ package serverui
 import (
 	"bytes"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
 	"embed"
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/zxhtom/portmap/internal/relay"
+	"github.com/zxhtom/portmap/internal/websession"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -39,7 +39,7 @@ type Server struct {
 	dir            string
 	inventory      *relay.Inventory
 	username, hash string
-	sessions       map[[32]byte]session
+	sm             *websession.Manager
 	attempts       map[string]attempt
 	http           *http.Server
 	ln             net.Listener
@@ -78,7 +78,7 @@ func privateFile(path string, data []byte) error {
 }
 
 func New(dir string, inventory *relay.Inventory) (*Server, error) {
-	s := &Server{dir: dir, inventory: inventory, sessions: map[[32]byte]session{}, attempts: map[string]attempt{}}
+	s := &Server{dir: dir, inventory: inventory, attempts: map[string]attempt{}}
 	path := filepath.Join(dir, "server-web-auth.json")
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -114,6 +114,12 @@ func New(dir string, inventory *relay.Inventory) (*Server, error) {
 		return nil, fmt.Errorf("invalid server web password hash")
 	}
 	s.username, s.hash = creds.Username, creds.Hash
+	fp := websession.CredentialFingerprint(s.username, s.hash)
+	sm, err := websession.New(filepath.Join(dir, "server-remember-sessions.json"), fp)
+	if err != nil {
+		return nil, fmt.Errorf("init server web session manager: %w", err)
+	}
+	s.sm = sm
 	return s, nil
 }
 
@@ -152,20 +158,12 @@ func decode(w http.ResponseWriter, r *http.Request, v any) error {
 	}
 	return nil
 }
-func (s *Server) authenticated(r *http.Request) (session, bool) {
+func (s *Server) authenticated(r *http.Request) (websession.Session, bool) {
 	c, err := r.Cookie("portmap_server")
 	if err != nil {
-		return session{}, false
+		return websession.Session{}, false
 	}
-	key := sha256.Sum256([]byte(c.Value))
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	v, ok := s.sessions[key]
-	if !ok || !time.Now().Before(v.Expires) {
-		delete(s.sessions, key)
-		return session{}, false
-	}
-	return v, true
+	return s.sm.Get(c.Value)
 }
 
 func (s *Server) Handler() http.Handler { return http.HandlerFunc(s.serveHTTP) }
@@ -179,7 +177,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.login(w, r)
 		return
 	}
-	if r.URL.Path == "/" || r.URL.Path == "/app.js" || r.URL.Path == "/style.css" {
+	if r.URL.Path == "/" || r.URL.Path == "/app.js" || r.URL.Path == "/style.css" || r.URL.Path == "/favicon.svg" {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			fail(w, 405, "method not allowed")
 			return
@@ -211,10 +209,12 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/auth/session" && r.Method == http.MethodGet:
 		respond(w, 200, map[string]any{"username": s.username, "csrf_token": sess.CSRF, "expires_at": sess.Expires})
 	case r.URL.Path == "/auth/logout" && r.Method == http.MethodPost:
-		c, _ := r.Cookie("portmap_server")
-		s.mu.Lock()
-		delete(s.sessions, sha256.Sum256([]byte(c.Value)))
-		s.mu.Unlock()
+		if c, err := r.Cookie("portmap_server"); err == nil {
+			if err := s.sm.Delete(c.Value); err != nil {
+				fail(w, 500, "退出失败，请稍后重试")
+				return
+			}
+		}
 		http.SetCookie(w, &http.Cookie{Name: "portmap_server", Value: "", Path: "/", HttpOnly: true, Secure: browserHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		respond(w, 200, map[string]bool{"ok": true})
 	case r.URL.Path == "/api/tunnels" && r.Method == http.MethodGet:
@@ -256,8 +256,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
+		Username   string `json:"username"`
+		Password   string `json:"password"`
+		RememberMe bool   `json:"remember_me"`
 	}
 	if err := decode(w, r, &body); err != nil || len(body.Password) > 72 {
 		fail(w, 400, "invalid credentials")
@@ -270,7 +271,6 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	now := time.Now()
 	for k, a := range s.attempts {
 		if now.Sub(a.Since) > 15*time.Minute {
@@ -279,6 +279,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	a := s.attempts[ip]
 	if a.Count >= 5 || len(s.attempts) > 1024 {
+		s.mu.Unlock()
 		fail(w, 429, "尝试次数过多")
 		return
 	}
@@ -288,23 +289,31 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		}
 		a.Count++
 		s.attempts[ip] = a
+		s.mu.Unlock()
 		fail(w, 401, "账号或密码错误")
 		return
 	}
 	delete(s.attempts, ip)
-	secret, err := token()
+	secret, _, _, maxAge, err := s.sm.CreateSession(body.RememberMe)
+	s.mu.Unlock()
 	if err != nil {
+		if err.Error() == "too many active sessions" {
+			fail(w, 429, "登录会话过多，请稍后重试")
+			return
+		}
 		fail(w, 500, "cannot create session")
 		return
 	}
-	csrf, err := token()
-	if err != nil {
-		fail(w, 500, "cannot create session")
-		return
-	}
-	expires := now.Add(12 * time.Hour)
-	s.sessions[sha256.Sum256([]byte(secret))] = session{Expires: expires, CSRF: csrf}
-	http.SetCookie(w, &http.Cookie{Name: "portmap_server", Value: secret, Path: "/", HttpOnly: true, Secure: browserHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: 43200})
+
+	http.SetCookie(w, &http.Cookie{
+		Name:     "portmap_server",
+		Value:    secret,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   browserHTTPS(r),
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   maxAge,
+	})
 	respond(w, 200, map[string]bool{"ok": true})
 }
 
