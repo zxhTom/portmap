@@ -167,7 +167,7 @@ func validateConfig(c *config.Config) error {
 func remoteFor(c config.Config, name string) config.Remote {
 	for _, r := range c.Remotes {
 		if r.Name == name {
-			if c.DomainZone != "" {
+			if r.DomainZone == "" && c.DomainZone != "" {
 				r.DomainZone = c.DomainZone
 			}
 			return r

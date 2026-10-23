@@ -254,7 +254,7 @@ func (m *Manager) Shutdown() {
 func (m *Manager) RemoteByName(name string) (config.Remote, error) {
 	for _, r := range m.cfg.Remotes {
 		if r.Name == name {
-			if m.cfg.DomainZone != "" {
+			if r.DomainZone == "" && m.cfg.DomainZone != "" {
 				r.DomainZone = m.cfg.DomainZone
 			}
 			return r, nil
