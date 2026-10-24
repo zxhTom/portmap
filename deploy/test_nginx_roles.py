@@ -28,6 +28,19 @@ class NginxRolesTest(unittest.TestCase):
         self.assertNotIn('127.0.0.1:9890', config)
         self.assertIn('/live/portmap-client-1822/fullchain.pem', config)
 
+    def test_8130_client_and_server_upstreams_are_separate(self):
+        config = read('portmap-consoles-8130.nginx.conf')
+        blocks = re.split(r'\nserver \{', config)
+        https = [b for b in blocks if 'listen 443' in b]
+        self.assertEqual(len(https), 2)
+        server = next(b for b in https if 'server_name server.port.toms.chat;' in b)
+        client = next(b for b in https if 'server_name portmap.port.toms.chat tomsportmap.port.toms.chat;' in b)
+        self.assertIn('proxy_pass http://127.0.0.1:9890;', server)
+        self.assertNotIn('127.0.0.1:9881', server)
+        self.assertIn('proxy_pass http://127.0.0.1:9881;', client)
+        self.assertNotIn('127.0.0.1:9890', client)
+        self.assertIn('/live/portmap-consoles/fullchain.pem', config)
+
     def test_namespaces_are_disjoint(self):
         self.assertFalse(domains(read('portmap-server.nginx.conf')) & domains(read('portmap-client-1822.nginx.conf')))
 
