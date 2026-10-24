@@ -1,9 +1,41 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Portmap 服务端</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#123e35">
+<meta name="color-scheme" content="light">
+<title>Portmap Relay · 服务端</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/style.css">
+<script src="/app.js" defer></script>
+</head>
 <body>
-<header><strong>portmap<span class="dot">.</span></strong><span>服务端 · 中转站视图</span><button id="logout" hidden>退出</button></header>
-<main>
-<section id="login" class="card" hidden><h1>登录中转站</h1><p>查看和禁用经过此 VPS 的映射。</p><form id="login-form"><label>账号<input name="username" autocomplete="username" value="admin" required></label><label>密码<input name="password" type="password" autocomplete="current-password" required></label><label class="remember-row"><input type="checkbox" name="remember_me"> 记住登录 30 天</label><p id="login-error" class="error"></p><button type="submit">登录</button></form></section>
-<section id="dashboard" hidden><div class="heading"><div><h1>映射总览</h1><p>客户端定期上报；状态超过 45 秒未更新会显示离线。此处可禁用或重新启用映射，不能创建隧道。</p></div><button id="refresh">刷新</button></div><div id="summary" class="summary"></div><div class="table-wrap"><table><thead><tr><th>客户端 / 映射</th><th>VPS 入口</th><th>客户端目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" hidden>还没有客户端上报映射。客户端启动或更新后会自动同步。</p><p id="notice" class="error"></p></section>
-</main>
-</body></html>
+<svg class="icon-defs" aria-hidden="true"><defs>
+<symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/></symbol>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3m-4 5v2"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M4 12h16m-6-6 6 6-6 6"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8 12 3 3 5-6"/></symbol>
+<symbol id="i-terminal" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="3"/><path d="m6 9 3 3-3 3m6 0h5"/></symbol>
+<symbol id="i-server" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M14 6.5h3m-3 11h3"/></symbol>
+</defs></svg>
+
+<section id="login" class="login-page" hidden>
+ <div class="login-story">
+  <a class="brand login-brand" href="/"><span class="brand-mark">p<span>↗</span></span><span>portmap<span class="brand-dot">.</span></span><span class="brand-tag">RELAY</span></a>
+  <div class="story-copy"><span class="eyebrow light"><span class="live-dot"></span> TRAFFIC RELAY &amp; INVENTORY</span><h1>让每一条连接，<br>都有清晰的来路<span>。</span></h1><p>聚合跨节点隧道与端口映射。<br>中转、状态与管控，在服务端清晰呈现。</p></div>
+  <div class="network-art" aria-hidden="true"><div class="orbit orbit-one"></div><div class="orbit orbit-two"></div><div class="orbit orbit-three"></div><div class="art-wire wire-one"></div><div class="art-wire wire-two"></div><div class="art-core"><span class="brand-mark">p<span>↗</span></span><span>RELAY</span><small>Portmap Server</small></div><div class="art-node node-one"><svg class="icon"><use href="#i-terminal"/></svg><div>Client Ingress<small>REPORTED MAPPINGS</small></div><i></i></div><div class="art-node node-two"><svg class="icon"><use href="#i-server"/></svg><div>Relay VPS<small>CENTRAL SWITCHBOARD</small></div><i></i></div><div class="art-mini"><span class="live-dot"></span>Central relay. Verified routes.</div></div>
+  <div class="story-bottom"><span>BUILT FOR YOUR INFRASTRUCTURE</span><span>CENTRAL RELAY / TRAFFIC SWITCHBOARD</span></div>
+ </div>
+ <div class="login-panel"><span class="login-corner"><svg class="icon"><use href="#i-shield"/></svg> 独立身份验证 · 中转站视图</span><div class="login-form-wrap"><span class="eyebrow">WELCOME BACK</span><h2>欢迎回来</h2><p class="login-sub">登录中转站，查看和禁用经过此 VPS 的映射。</p><form id="login-form"><label for="username">管理账号</label><div class="input-icon"><svg class="icon"><use href="#i-user"/></svg><input id="username" name="username" autocomplete="username" value="admin" required maxlength="128" placeholder="请输入账号"></div><label for="password">登录密码</label><div class="input-icon"><svg class="icon"><use href="#i-lock"/></svg><input id="password" name="password" type="password" autocomplete="current-password" required maxlength="72" placeholder="输入你的管理密码"><button class="icon-button password-toggle" type="button" aria-label="显示密码"><svg class="icon"><use href="#i-eye"/></svg></button></div><div class="login-meta"><label class="checkbox-label"><input type="checkbox" id="remember_me" name="remember_me"> 记住登录 30 天</label><span class="meta-tip">安全会话</span></div><p id="login-error" class="form-error" role="alert" hidden></p><button type="submit" class="button primary login-submit"><span>进入中转站</span><svg class="icon"><use href="#i-arrow"/></svg></button></form><div class="login-note"><svg class="icon"><use href="#i-shield"/></svg><p>连接私有网络，从一次安全登录开始。<br><span>建议使用 HTTPS 或 SSH 转发访问。</span></p></div></div><footer class="login-footer"><span>© Portmap Relay</span><span>连接，自在掌控 <span class="tiny-arrow">↗</span></span></footer></div>
+</section>
+
+<div id="dashboard-shell" class="dashboard-shell" hidden>
+ <header class="dashboard-header"><strong>portmap<span class="dot">.</span></strong><span>服务端 · 中转站视图</span><button id="logout" hidden>退出</button></header>
+ <main class="dashboard-main">
+  <section id="dashboard" hidden><div class="heading"><div><h1>映射总览</h1><p>客户端定期上报；状态超过 45 秒未更新会显示离线。此处可禁用或重新启用映射，不能创建隧道。</p></div><button id="refresh">刷新</button></div><div id="summary" class="summary"></div><div class="table-wrap"><table><thead><tr><th>客户端 / 映射</th><th>VPS 入口</th><th>客户端目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" hidden>还没有客户端上报映射。客户端启动或更新后会自动同步。</p><p id="notice" class="error"></p></section>
+ </main>
+</div>
+</body>
+</html>

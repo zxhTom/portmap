@@ -10,7 +10,13 @@ async function request(path, method='GET', body) {
  if(!response.ok) throw new Error(data.error||`请求失败 ${response.status}`);
  return data;
 }
-function view(loggedIn){$('#login').hidden=loggedIn;$('#dashboard').hidden=!loggedIn;$('#logout').hidden=!loggedIn;}
+function view(loggedIn){
+ $('#login').hidden=loggedIn;
+ const shell=$('#dashboard-shell');
+ if(shell) shell.hidden=!loggedIn;
+ $('#dashboard').hidden=!loggedIn;
+ $('#logout').hidden=!loggedIn;
+}
 function cell(row, value){const td=document.createElement('td');td.textContent=value;row.append(td);return td;}
 function render(records){
  const body=$('#rows');body.replaceChildren();
@@ -31,7 +37,9 @@ function render(records){
  }
 }
 async function refresh(){try{render(await request('/api/tunnels'));$('#notice').textContent='';}catch(e){$('#notice').textContent=e.message;if(e.message==='请先登录'){session=null;view(false);}}}
-$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const data=new FormData(form);$('#login-error').textContent='';try{await request('/auth/login','POST',{username:data.get('username'),password:data.get('password'),remember_me:form.querySelector('input[name="remember_me"]')?.checked||false});session=await request('/auth/session');form.reset();view(true);await refresh();}catch(e){$('#login-error').textContent=e.message;}});
+$('#login-form').addEventListener('submit',async event=>{event.preventDefault();const form=event.currentTarget;const data=new FormData(form);$('#login-error').textContent='';$('#login-error').hidden=true;try{await request('/auth/login','POST',{username:data.get('username'),password:data.get('password'),remember_me:form.querySelector('input[name="remember_me"]')?.checked||false});session=await request('/auth/session');form.reset();view(true);await refresh();}catch(e){$('#login-error').textContent=e.message;$('#login-error').hidden=false;}});
+const pwdToggle=$('.password-toggle');
+if(pwdToggle){pwdToggle.addEventListener('click',()=>{const input=$('#password');if(input){input.type=input.type==='password'?'text':'password';pwdToggle.setAttribute('aria-label',input.type==='password'?'显示密码':'隐藏密码');}});}
 $('#refresh').addEventListener('click',refresh);
 $('#logout').addEventListener('click',async()=>{try{await request('/auth/logout','POST');}finally{session=null;view(false);}});
 (async()=>{try{session=await request('/auth/session');view(true);await refresh();}catch{view(false);}})();
