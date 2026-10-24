@@ -202,6 +202,7 @@ var addCmd = &cobra.Command{
 			"description":     description,
 			"expires_at":      addExpiresAt,
 			"domain_prefixes": domainPrefixes, "upstream_scheme": upstreamScheme,
+			"domain_zone": cmd.Flag("domain-zone").Value.String(),
 		}
 
 		if mappingType == "ssh" {
@@ -503,6 +504,7 @@ func init() {
 	remoteAddCmd.MarkFlagRequired("host")
 
 	addCmd.Flags().StringVar(&addExpiresAt, "expires-at", "", "Expiry time in RFC3339 (default: no expiry)")
+	addCmd.Flags().String("domain-zone", "", "Suffix bound to the selected VPS (default: its primary suffix)")
 	addCmd.Flags().StringSliceVar(&domainPrefixes, "domain", nil, "Domain prefix(es), e.g. portmap or app,api; HTTP services only")
 	addCmd.Flags().StringVar(&upstreamScheme, "upstream-scheme", "http", "Domain upstream protocol: http or https")
 	// add mapping flags

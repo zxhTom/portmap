@@ -14,6 +14,7 @@ import (
 	"github.com/zxhtom/portmap/internal/api"
 	"github.com/zxhtom/portmap/internal/config"
 	"github.com/zxhtom/portmap/internal/manager"
+	"github.com/zxhtom/portmap/internal/relayprotocol"
 )
 
 func fixture(t *testing.T) (*Server, string) {
@@ -285,5 +286,24 @@ func TestPasswordChangeRollbackConsistency(t *testing.T) {
 	s.mu.Unlock()
 	if !strings.Contains(string(origBytes), memHash) {
 		t.Fatalf("memory creds desynced from disk web-auth.json")
+	}
+}
+
+func TestVPSDomainSettingsRequireCSRFAndStayScoped(t *testing.T) {
+	s, pw := fixture(t)
+	cookie, csrf := loginTest(t, s, pw)
+	s.mgr.SetDomainRequester(func(_ config.Remote, r relayprotocol.Request) (relayprotocol.Response, error) {
+		return relayprotocol.Response{Zone: r.Zone, Zones: r.Zones}, nil
+	})
+	body := map[string]any{"domain_zones": []string{"first.example", "second.example"}, "domain_zone": "second.example"}
+	if got := call(s, "PUT", "/api/remotes/test/domain-zones", body, cookie, "", "http://localhost").Code; got != 403 {
+		t.Fatal("VPS zones bypassed CSRF")
+	}
+	if got := call(s, "PUT", "/api/remotes/test/domain-zones", body, cookie, csrf, "http://localhost").Code; got != 200 {
+		t.Fatalf("VPS zones: %d", got)
+	}
+	remote, _ := s.mgr.RemoteByName("test")
+	if remote.DomainZone != "second.example" || len(remote.DomainZones) != 2 {
+		t.Fatal("VPS zones missing")
 	}
 }

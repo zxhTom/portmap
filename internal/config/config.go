@@ -33,13 +33,14 @@ type AuthConfig struct {
 }
 
 type Remote struct {
-	DomainZone string     `json:"domain_zone,omitempty"`
-	Name       string     `json:"name"`
-	Host       string     `json:"host"`
-	Port       int        `json:"port"`
-	User       string     `json:"user"`
-	Auth       AuthConfig `json:"auth"`
-	StrictHost bool       `json:"strict_host,omitempty"`
+	DomainZones []string   `json:"domain_zones,omitempty"`
+	DomainZone  string     `json:"domain_zone,omitempty"`
+	Name        string     `json:"name"`
+	Host        string     `json:"host"`
+	Port        int        `json:"port"`
+	User        string     `json:"user"`
+	Auth        AuthConfig `json:"auth"`
+	StrictHost  bool       `json:"strict_host,omitempty"`
 }
 
 func (r Remote) Addr() string {
@@ -56,6 +57,7 @@ type DockerConfig struct {
 }
 
 type Mapping struct {
+	DomainZone     string   `json:"domain_zone,omitempty"`
 	DomainPrefixes []string `json:"domain_prefixes,omitempty"`
 	UpstreamScheme string   `json:"upstream_scheme,omitempty"`
 	DomainOwner    string   `json:"-"`

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/zxhtom/portmap/internal/relay"
+	"github.com/zxhtom/portmap/internal/relayprotocol"
 	"github.com/zxhtom/portmap/internal/websession"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -35,6 +36,7 @@ type attempt struct {
 	Since time.Time
 }
 type Server struct {
+	control        func(relayprotocol.Request) (relayprotocol.Response, error)
 	mu             sync.Mutex
 	dir            string
 	inventory      *relay.Inventory
@@ -217,12 +219,45 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		http.SetCookie(w, &http.Cookie{Name: "portmap_server", Value: "", Path: "/", HttpOnly: true, Secure: browserHTTPS(r), SameSite: http.SameSiteStrictMode, MaxAge: -1})
 		respond(w, 200, map[string]bool{"ok": true})
+	case r.URL.Path == "/api/domain-zones" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+		if s.control == nil {
+			fail(w, 503, "服务端域名配置不可用")
+			return
+		}
+		req := relayprotocol.Request{Operation: "info"}
+		if r.Method == http.MethodPut {
+			var body struct {
+				Zones   []string `json:"domain_zones"`
+				Primary string   `json:"domain_zone"`
+			}
+			if err := decode(w, r, &body); err != nil {
+				fail(w, 400, "invalid JSON")
+				return
+			}
+			req.Operation = "configure_zones"
+			req.Zones = body.Zones
+			req.Zone = body.Primary
+		}
+		response, err := s.control(req)
+		if err != nil {
+			fail(w, 400, err.Error())
+			return
+		}
+		respond(w, 200, map[string]any{"domain_zone": response.Zone, "domain_zones": response.Zones})
 	case r.URL.Path == "/api/tunnels" && r.Method == http.MethodGet:
 		respond(w, 200, s.inventory.List())
 	case strings.HasPrefix(r.URL.Path, "/api/tunnels/") && r.Method == http.MethodPost:
 		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/tunnels/"), "/")
 		if len(parts) != 2 || parts[0] == "" {
 			http.NotFound(w, r)
+			return
+		}
+		if parts[1] == "recover" {
+			if err := s.inventory.RequestRecovery(parts[0]); err != nil {
+				fail(w, 400, err.Error())
+				return
+			}
+			respond(w, 202, map[string]string{"message": "等待客户端接收恢复请求"})
 			return
 		}
 		var disabled bool
@@ -353,4 +388,8 @@ func (s *Server) Close() {
 	} else if s.ln != nil {
 		_ = s.ln.Close()
 	}
+}
+
+func (s *Server) SetControl(fn func(relayprotocol.Request) (relayprotocol.Response, error)) {
+	s.control = fn
 }

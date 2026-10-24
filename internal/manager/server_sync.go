@@ -70,11 +70,25 @@ func (m *Manager) SyncServers() {
 			ListenHost: listenHost, ListenPort: row.ListenPort,
 			Target: mappingTarget(row), Domains: row.Domains,
 			Description: row.Description, DesiredRunning: row.DesiredRunning,
-			Status: row.Status,
+			Status: row.Status, Health: row.Health, Invalid: row.InvalidReason != "", ExpiresAt: row.ExpiresAt,
 		})
 	}
 	for _, b := range batches {
-		response, err := requester(b.remote, relayprotocol.Request{Operation: "tunnel_snapshot", ClientID: clientID, ClientName: clientName, Mappings: b.items})
+		m.mu.Lock()
+		results := []relayprotocol.RecoveryResult{}
+		owners := map[string]bool{}
+		for _, item := range b.items {
+			owners[item.Owner] = true
+		}
+		for owner, result := range m.recoveryResults[relayIdentity(b.remote)] {
+			if owners[owner] {
+				results = append(results, result)
+			} else {
+				delete(m.recoveryResults[relayIdentity(b.remote)], owner)
+			}
+		}
+		m.mu.Unlock()
+		response, err := requester(b.remote, relayprotocol.Request{RecoveryResults: results, Operation: "tunnel_snapshot", ClientID: clientID, ClientName: clientName, Mappings: b.items})
 		if err != nil {
 			continue
 		} // Plain SSH VPS or an older relay remains usable.
@@ -91,6 +105,9 @@ func (m *Manager) SyncServers() {
 			if disabled[item.Owner] {
 				m.closeDisabledMapping(mappingKey{Group: item.Group, Name: item.Name})
 			}
+		}
+		for _, command := range response.RecoveryCommands {
+			m.processRecovery(b.remote, b.items, command)
 		}
 	}
 }

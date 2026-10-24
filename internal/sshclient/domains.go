@@ -94,7 +94,10 @@ type domainLease struct {
 }
 
 func (t *Tunnel) domainRequest(operation string) relayprotocol.Request {
-	zone := t.remote.DomainZone
+	zone := t.mapping.DomainZone
+	if zone == "" {
+		zone = t.remote.DomainZone
+	}
 	if zone == "" {
 		zone = relayprotocol.DefaultZone
 	}

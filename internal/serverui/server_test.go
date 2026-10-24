@@ -24,7 +24,7 @@ func TestConsoleAuthenticationAndDisableOnly(t *testing.T) {
 	client := "0123456789abcdef"
 	h := sha256.Sum256([]byte(client + "\x00web\x00app"))
 	owner := hex.EncodeToString(h[:])
-	_, err = i.Snapshot(client, "client", []relayprotocol.MappingReport{{Owner: owner, Group: "web", Name: "app", ListenPort: 12345, Status: "running"}})
+	_, err = i.Snapshot(client, "client", []relayprotocol.MappingReport{{Owner: owner, Group: "web", Name: "app", ListenPort: 12345, Status: "running", DesiredRunning: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestConsoleAuthenticationAndDisableOnly(t *testing.T) {
 			b, _ = json.Marshal(body)
 		}
 		r := httptest.NewRequest(method, "http://localhost"+path, bytes.NewReader(b))
-		if method == http.MethodPost {
+		if method != http.MethodGet {
 			r.Header.Set("Origin", "http://localhost")
 			r.Header.Set("X-CSRF-Token", csrf)
 		}
@@ -56,6 +56,15 @@ func TestConsoleAuthenticationAndDisableOnly(t *testing.T) {
 		w := httptest.NewRecorder()
 		s.Handler().ServeHTTP(w, r)
 		return w
+	}
+	central, err := relay.New(t.TempDir(), "first.example")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer central.Close()
+	s.SetControl(central.Apply)
+	if got := call("GET", "/api/domain-zones", nil, nil, "").Code; got != 401 {
+		t.Fatal("unauthenticated zones")
 	}
 	if got := call("GET", "/api/tunnels", nil, nil, "").Code; got != 401 {
 		t.Fatalf("unauthenticated list: %d", got)
@@ -72,6 +81,16 @@ func TestConsoleAuthenticationAndDisableOnly(t *testing.T) {
 	if err := json.Unmarshal(sess.Body.Bytes(), &token); err != nil || token.CSRF == "" {
 		t.Fatalf("session: %v %s", err, sess.Body.String())
 	}
+	zones := map[string]any{"domain_zones": []string{"first.example", "second.example"}, "domain_zone": "second.example"}
+	if got := call("PUT", "/api/domain-zones", zones, cookie, "").Code; got != 403 {
+		t.Fatal("zones bypassed CSRF")
+	}
+	if got := call("PUT", "/api/domain-zones", zones, cookie, token.CSRF).Code; got != 200 {
+		t.Fatalf("zones save: %d", got)
+	}
+	if got := call("POST", "/api/tunnels/"+owner+"/recover", nil, cookie, "").Code; got != 403 {
+		t.Fatal("recover bypassed CSRF")
+	}
 	if got := call("POST", "/api/tunnels/"+owner+"/disable", nil, cookie, "").Code; got != 403 {
 		t.Fatalf("missing CSRF: %d", got)
 	}
@@ -81,12 +100,19 @@ func TestConsoleAuthenticationAndDisableOnly(t *testing.T) {
 	if got := call("POST", "/api/tunnels/"+owner+"/disable", nil, cookie, token.CSRF).Code; got != 200 {
 		t.Fatalf("disable: %d", got)
 	}
+	if got := call("POST", "/api/tunnels/"+owner+"/recover", nil, cookie, token.CSRF).Code; got != 400 {
+		t.Fatal("disabled tunnel recovery accepted")
+	}
 	if disabled, _ := i.Check(owner); !disabled {
 		t.Fatal("disable policy not saved")
 	}
 	if got := call("POST", "/api/tunnels/"+owner+"/enable", nil, cookie, token.CSRF).Code; got != 200 {
 		t.Fatalf("enable: %d", got)
 	}
+	if got := call("POST", "/api/tunnels/"+owner+"/recover", nil, cookie, token.CSRF).Code; got != 202 {
+		t.Fatalf("recover: %d", got)
+	}
+
 }
 
 func TestHTTPSReverseProxyOriginAndCookie(t *testing.T) {

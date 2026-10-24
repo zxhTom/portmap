@@ -22,9 +22,15 @@ type Inventory struct {
 	dir      string
 	records  map[string]TunnelRecord
 	disabled map[string]bool
+	recovery map[string]*recoveryState
 }
 
 type TunnelRecord struct {
+	ProbeError       string    `json:"probe_error,omitempty"`
+	ProbedAt         time.Time `json:"probed_at"`
+	RecoveryStatus   string    `json:"recovery_status,omitempty"`
+	RecoveryMessage  string    `json:"recovery_message,omitempty"`
+	RecoveryAttempts int       `json:"recovery_attempts"`
 	relayprotocol.MappingReport
 	ClientID   string    `json:"client_id"`
 	ClientName string    `json:"client_name"`
@@ -42,7 +48,7 @@ func validHexID(v string, bytes int) bool {
 }
 
 func NewInventory(dir string) (*Inventory, error) {
-	i := &Inventory{dir: dir, records: map[string]TunnelRecord{}, disabled: map[string]bool{}}
+	i := &Inventory{dir: dir, records: map[string]TunnelRecord{}, disabled: map[string]bool{}, recovery: map[string]*recoveryState{}}
 	data, err := os.ReadFile(filepath.Join(dir, "disabled-tunnels.json"))
 	if err == nil {
 		err = json.Unmarshal(data, &i.disabled)
@@ -153,15 +159,31 @@ func (i *Inventory) Snapshot(clientID, clientName string, mappings []relayprotoc
 		}
 	}
 	for owner, record := range i.records {
+		if candidate, ok := next[owner]; ok {
+			candidate.ProbeError = record.ProbeError
+			candidate.ProbedAt = record.ProbedAt
+			next[owner] = candidate
+		}
 		if record.ClientID == clientID {
+			if _, kept := next[owner]; !kept {
+				delete(i.recovery, owner)
+			}
 			delete(i.records, owner)
 		}
 	}
 	disabled := make([]string, 0)
 	for owner, record := range next {
+		if prior, ok := i.records[owner]; ok {
+			record.ProbeError = prior.ProbeError
+			record.ProbedAt = prior.ProbedAt
+		}
 		record.Disabled = i.disabled[owner]
 		record.Online = record.Status == "running" && !record.Disabled
 		i.records[owner] = record
+		if state := i.recovery[owner]; state != nil && state.Status == "pending" && !recoveryEligible(record, now) {
+			state.Status = "skipped"
+			state.Message = "当前启停意图或策略不允许恢复"
+		}
 		if record.Disabled {
 			disabled = append(disabled, owner)
 		}
@@ -175,7 +197,12 @@ func (i *Inventory) List() []TunnelRecord {
 	defer i.mu.RUnlock()
 	result := make([]TunnelRecord, 0, len(i.records))
 	for _, record := range i.records {
-		record.Online = record.Online && time.Since(record.LastSeen) < 45*time.Second && !record.Disabled
+		record.Online = record.Online && time.Since(record.LastSeen) < 45*time.Second && !record.Disabled && record.ProbeError == ""
+		if state := i.recovery[record.Owner]; state != nil {
+			record.RecoveryStatus = state.Status
+			record.RecoveryMessage = state.Message
+			record.RecoveryAttempts = state.Attempts
+		}
 		result = append(result, record)
 	}
 	sort.Slice(result, func(a, b int) bool {

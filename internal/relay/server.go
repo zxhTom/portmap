@@ -41,9 +41,11 @@ type Binding struct {
 type Server struct {
 	mu            sync.RWMutex
 	zone, dir     string
+	zones         []string
 	bindings      map[string]Binding
 	inventory     *Inventory
 	control, http *http.Server
+	cancel        context.CancelFunc
 	lock          *config.InstanceLock
 	checkPort     func(int) error
 }
@@ -63,7 +65,11 @@ func New(dir, zone string) (*Server, error) {
 		lock.Release()
 		return nil, err
 	}
-	s := &Server{zone: zone, dir: dir, bindings: map[string]Binding{}, inventory: inventory, lock: lock, checkPort: LoopbackOnly}
+	s := &Server{zone: zone, zones: []string{zone}, dir: dir, bindings: map[string]Binding{}, inventory: inventory, lock: lock, checkPort: LoopbackOnly}
+	if err := s.loadZones(); err != nil {
+		lock.Release()
+		return nil, err
+	}
 	data, err := os.ReadFile(filepath.Join(dir, "domains.json"))
 	if err == nil {
 		err = json.Unmarshal(data, &s.bindings)
@@ -73,7 +79,7 @@ func New(dir, zone string) (*Server, error) {
 		return nil, err
 	}
 	for host, b := range s.bindings {
-		if !strings.HasSuffix(host, "."+zone) || b.Owner == "" {
+		if !s.acceptsHost(host) || b.Owner == "" {
 			lock.Release()
 			return nil, fmt.Errorf("invalid saved domain registry")
 		}
@@ -108,7 +114,15 @@ func (s *Server) save(next map[string]Binding) error {
 	return os.Rename(name, filepath.Join(s.dir, "domains.json"))
 }
 func (s *Server) Apply(req relayprotocol.Request) (relayprotocol.Response, error) {
-	response := relayprotocol.Response{Zone: s.zone}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	response := relayprotocol.Response{Zone: s.zone, Zones: append([]string(nil), s.zones...)}
+	if req.Operation == "configure_zones" {
+		if err := s.configureZones(req.Zones, req.Zone); err != nil {
+			return response, err
+		}
+		return relayprotocol.Response{Zone: s.zone, Zones: append([]string(nil), s.zones...)}, nil
+	}
 	if req.Operation == "info" {
 		return response, nil
 	}
@@ -120,12 +134,22 @@ func (s *Server) Apply(req relayprotocol.Request) (relayprotocol.Response, error
 	if req.Operation == "tunnel_snapshot" {
 		var err error
 		response.DisabledOwners, err = s.inventory.Snapshot(req.ClientID, req.ClientName, req.Mappings)
+		if err == nil {
+			err = s.inventory.Acknowledge(req.ClientID, req.RecoveryResults)
+		}
+		if err == nil {
+			response.RecoveryCommands = s.inventory.RecoveryCommands(req.ClientID)
+		}
 		return response, err
 	}
 	if len(req.Owner) < 16 || len(req.Owner) > 512 {
 		return response, fmt.Errorf("invalid mapping owner")
 	}
-	if req.Zone != "" && req.Zone != s.zone {
+	zone := req.Zone
+	if zone == "" {
+		zone = s.zone
+	}
+	if !s.acceptsZone(zone) {
 		return response, fmt.Errorf("中转站域名区域为 %s，与客户端配置不一致", s.zone)
 	}
 	prefixes, err := relayprotocol.Normalize(req.Prefixes)
@@ -134,11 +158,9 @@ func (s *Server) Apply(req relayprotocol.Request) (relayprotocol.Response, error
 	}
 	hosts := make([]string, 0, len(prefixes))
 	for _, prefix := range prefixes {
-		hosts = append(hosts, prefix+"."+s.zone)
+		hosts = append(hosts, prefix+"."+zone)
 	}
 	response.Domains = hosts
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	switch req.Operation {
 	case "check", "reserve":
 		if len(hosts) == 0 {
@@ -370,11 +392,17 @@ func (s *Server) Listen(addr, socket string) error {
 	}
 	s.http = &http.Server{Handler: s.ProxyHandler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	s.control = &http.Server{Handler: s.ControlHandler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 20 * time.Second, WriteTimeout: 20 * time.Second, MaxHeaderBytes: 16 << 10}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	go s.inventory.Monitor(ctx)
 	go s.http.Serve(tcp)
 	go s.control.Serve(unix)
 	return nil
 }
 func (s *Server) Close() {
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if s.control != nil {
 		s.control.Close()
 	}

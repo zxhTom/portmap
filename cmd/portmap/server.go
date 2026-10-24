@@ -32,6 +32,7 @@ var serverServeCmd = &cobra.Command{
 		if err != nil {
 			return err
 		}
+		ui.SetControl(s.Apply)
 		if err := ui.Listen(serverWebAddr, serverWebCert, serverWebKey); err != nil {
 			return err
 		}

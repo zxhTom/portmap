@@ -81,7 +81,7 @@ func (m *Manager) SetDomainZone(value string) error {
 	return m.Reconcile()
 }
 func (m *Manager) domainRPC(remote config.Remote, mp config.Mapping, group, operation string) error {
-	_, err := m.domainRequester(remote, relayprotocol.Request{Operation: operation, Owner: domainOwner(m.instanceID, group, mp.Name), Prefixes: mp.DomainPrefixes, Port: mp.ListenPort, Scheme: mp.UpstreamScheme, Zone: domainZone(remote)})
+	_, err := m.domainRequester(remote, relayprotocol.Request{Operation: operation, Owner: domainOwner(m.instanceID, group, mp.Name), Prefixes: mp.DomainPrefixes, Port: mp.ListenPort, Scheme: mp.UpstreamScheme, Zone: mappingZone(remote, mp)})
 	return err
 }
 func (m *Manager) releaseDomains(group string, mp config.Mapping, cfg config.Config) error {
@@ -93,20 +93,20 @@ func (m *Manager) releaseDomains(group string, mp config.Mapping, cfg config.Con
 
 // SetDomains updates a mapping in place, with a brief reconnect when its
 // transport changes between public TCP and loopback-only domain routing.
-func (m *Manager) SetDomains(group, name string, prefixes []string, scheme string) error {
+func (m *Manager) SetDomains(group, name string, prefixes []string, scheme string, zones ...string) error {
 	prefixes, err := relayprotocol.Normalize(prefixes)
 	if err != nil {
 		return err
 	}
 	m.controlMu.Lock()
-	err = m.saveDomains(group, name, prefixes, scheme)
+	err = m.saveDomains(group, name, prefixes, scheme, zones...)
 	m.controlMu.Unlock()
 	if err != nil {
 		return err
 	}
 	return m.Reconcile()
 }
-func (m *Manager) saveDomains(group, name string, prefixes []string, scheme string) error {
+func (m *Manager) saveDomains(group, name string, prefixes []string, scheme string, zones ...string) error {
 	key := mappingKey{Group: group, Name: name}
 	m.mu.Lock()
 	e := m.entries[key]
@@ -123,6 +123,12 @@ func (m *Manager) saveDomains(group, name string, prefixes []string, scheme stri
 	updated.DomainPrefixes = prefixes
 	updated.UpstreamScheme = scheme
 	updated.SetDefaults()
+	if len(zones) > 0 && zones[0] != "" {
+		updated.DomainZone = zones[0]
+		if err := selectMappingZone(remoteFor(cfg, updated.Remote), &updated); err != nil {
+			return err
+		}
+	}
 	if err := updated.Validate(); err != nil {
 		return err
 	}
@@ -173,4 +179,42 @@ func (m *Manager) saveDomains(group, name string, prefixes []string, scheme stri
 		}
 	}
 	return nil
+}
+
+func mappingZone(remote config.Remote, mp config.Mapping) string {
+	if mp.DomainZone != "" {
+		return mp.DomainZone
+	}
+	return domainZone(remote)
+}
+func remoteZones(remote config.Remote) []string {
+	if len(remote.DomainZones) > 0 {
+		return append([]string(nil), remote.DomainZones...)
+	}
+	return []string{domainZone(remote)}
+}
+func selectMappingZone(remote config.Remote, mp *config.Mapping) error {
+	if len(mp.DomainPrefixes) == 0 {
+		mp.DomainZone = ""
+		return nil
+	}
+	zone := mappingZone(remote, *mp)
+	var err error
+	zone, err = relayprotocol.ValidateZone(zone)
+	if err != nil {
+		return err
+	}
+	for _, allowed := range remoteZones(remote) {
+		if allowed == zone {
+			mp.DomainZone = zone
+			return nil
+		}
+	}
+	return fmt.Errorf("后缀 %s 不属于 VPS %s", zone, remote.Name)
+}
+
+func transportRemote(r config.Remote, mp config.Mapping) config.Remote {
+	r.DomainZone = mappingZone(r, mp)
+	r.DomainZones = nil
+	return r
 }

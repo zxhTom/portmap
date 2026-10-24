@@ -139,3 +139,10 @@ td small{display:block;color:#91a091;margin-top:5px}
   .heading p{font-size:11px}
 }
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+
+#zones-form {display:grid;gap:12px;max-width:620px;padding-top:18px}
+#zones-form label {font-size:13px;font-weight:600;color:var(--green,#245c46)}
+#zones-form textarea,#zones-form select {box-sizing:border-box;width:100%;padding:12px;border:1px solid #dce7d7;border-radius:10px;background:#fff;color:#204737;font:inherit}
+#zones-form textarea {min-height:100px;resize:vertical}
+#zones-form p {margin:0;font-size:13px;line-height:1.7}
+#zones-form button {justify-self:start}

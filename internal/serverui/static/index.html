@@ -34,7 +34,7 @@
 <div id="dashboard-shell" class="dashboard-shell" hidden>
  <header class="dashboard-header"><strong>portmap<span class="dot">.</span></strong><span>服务端 · 中转站视图</span><button id="logout" hidden>退出</button></header>
  <main class="dashboard-main">
-  <section id="dashboard" hidden><div class="heading"><div><h1>映射总览</h1><p>客户端定期上报；状态超过 45 秒未更新会显示离线。此处可禁用或重新启用映射，不能创建隧道。</p></div><button id="refresh">刷新</button></div><div id="summary" class="summary"></div><div class="table-wrap"><table><thead><tr><th>客户端 / 映射</th><th>VPS 入口</th><th>客户端目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" hidden>还没有客户端上报映射。客户端启动或更新后会自动同步。</p><p id="notice" class="error"></p></section>
+  <section id="dashboard" hidden><div class="heading"><div><h1>映射总览</h1><p>客户端定期上报；状态超过 45 秒未更新会显示离线。服务端探测异常时会请求客户端恢复；也可手动请求恢复或禁用映射。</p></div><button id="refresh">刷新</button></div><details class="summary"><summary>此 VPS 的域名后缀</summary><form id="zones-form"><label for="server-zones">绑定后缀（每行一个）</label><textarea id="server-zones" required></textarea><label for="server-primary-zone">主后缀</label><select id="server-primary-zone" required></select><p>新增后缀需配置 DNS、Nginx 与证书；已有隧道使用的后缀不能移除。</p><button type="submit">保存后缀</button><p id="zones-notice" role="status"></p></form></details><div id="summary" class="summary"></div><div class="table-wrap"><table><thead><tr><th>客户端 / 映射</th><th>VPS 入口</th><th>客户端目标</th><th>状态</th><th>操作</th></tr></thead><tbody id="rows"></tbody></table></div><p id="empty" hidden>还没有客户端上报映射。客户端启动或更新后会自动同步。</p><p id="notice" class="error"></p></section>
  </main>
 </div>
 </body>

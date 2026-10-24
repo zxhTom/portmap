@@ -102,7 +102,41 @@ func (s *Server) handleRemotes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoteByPath(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/api/remotes/")
+	path := strings.TrimPrefix(r.URL.Path, "/api/remotes/")
+	if strings.HasSuffix(path, "/domain-zones") {
+		name := strings.TrimSuffix(path, "/domain-zones")
+		if r.Method == http.MethodGet {
+			if err := s.mgr.RefreshRemoteDomainZones(name); err != nil {
+				writeError(w, 400, err.Error())
+				return
+			}
+			for _, remote := range s.mgr.RemoteSummaries() {
+				if remote["name"] == name {
+					writeJSON(w, remote)
+					return
+				}
+			}
+		}
+		if r.Method != http.MethodPut {
+			writeError(w, 405, "method not allowed")
+			return
+		}
+		var body struct {
+			Zones   []string `json:"domain_zones"`
+			Primary string   `json:"domain_zone"`
+		}
+		if err := parseJSON(r, &body); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		if err := s.mgr.SetRemoteDomainZones(name, body.Zones, body.Primary); err != nil {
+			writeError(w, 400, err.Error())
+			return
+		}
+		writeJSON(w, map[string]string{"message": "VPS domain zones updated"})
+		return
+	}
+	name := path
 	if name == "" || strings.Contains(name, "/") {
 		writeError(w, http.StatusBadRequest, "invalid remote name")
 		return
@@ -159,14 +193,15 @@ func (s *Server) handleMappingByPath(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var req struct {
-			Prefixes *[]string `json:"domain_prefixes"`
-			Scheme   string    `json:"upstream_scheme"`
+			DomainZone string    `json:"domain_zone"`
+			Prefixes   *[]string `json:"domain_prefixes"`
+			Scheme     string    `json:"upstream_scheme"`
 		}
 		if err := parseJSON(r, &req); err != nil || req.Prefixes == nil {
 			writeError(w, 400, "domain_prefixes is required; an empty list removes domain routing")
 			return
 		}
-		if err := s.mgr.SetDomains(group, name, *req.Prefixes, req.Scheme); err != nil {
+		if err := s.mgr.SetDomains(group, name, *req.Prefixes, req.Scheme, req.DomainZone); err != nil {
 			writeError(w, 400, err.Error())
 			return
 		}
@@ -250,6 +285,7 @@ func (s *Server) handleMappingByPath(w http.ResponseWriter, r *http.Request) {
 }
 
 type addMappingRequest struct {
+	DomainZone     string   `json:"domain_zone"`
 	DomainPrefixes []string `json:"domain_prefixes"`
 	UpstreamScheme string   `json:"upstream_scheme"`
 	ExpiresAt      string   `json:"expires_at"`
@@ -282,6 +318,7 @@ func (s *Server) addMapping(w http.ResponseWriter, r *http.Request) {
 		req.Group = "default"
 	}
 	mp := config.Mapping{
+		DomainZone:     req.DomainZone,
 		DomainPrefixes: req.DomainPrefixes, UpstreamScheme: req.UpstreamScheme,
 		ExpiresAt:     req.ExpiresAt,
 		Name:          req.Name,

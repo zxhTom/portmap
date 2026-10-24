@@ -39,6 +39,7 @@ type entry struct {
 }
 
 type Manager struct {
+	recoveryResults     map[string]map[string]relayprotocol.RecoveryResult
 	controlMu           sync.Mutex
 	mu                  sync.Mutex
 	dir                 string
@@ -78,7 +79,7 @@ func defaultBackendFactory(group string, mp config.Mapping, remote config.Remote
 }
 
 func New(dir string) *Manager {
-	return &Manager{
+	return &Manager{recoveryResults: map[string]map[string]relayprotocol.RecoveryResult{},
 		dir:                dir,
 		cfg:                config.DefaultConfig(),
 		state:              config.DefaultState(),
@@ -264,6 +265,9 @@ func (m *Manager) RemoteByName(name string) (config.Remote, error) {
 }
 
 func (m *Manager) AddRemote(r config.Remote) error {
+	if err := normalizeRemoteZones(&r); err != nil {
+		return err
+	}
 	m.controlMu.Lock()
 	defer m.controlMu.Unlock()
 	m.mu.Lock()
@@ -759,7 +763,7 @@ func (m *Manager) ListMappings() []MappingInfo {
 	for key, e := range m.entries {
 		items = append(items, snapshotItem{
 			key:  key,
-			zone: domainZone(remoteFor(m.cfg, e.Mapping.Remote)),
+			zone: mappingZone(remoteFor(m.cfg, e.Mapping.Remote), e.Mapping),
 			mp:   e.Mapping,
 			st:   m.state.Mappings[key.String()],
 			e:    e,
@@ -822,7 +826,7 @@ func (m *Manager) ListMappings() []MappingInfo {
 			domains = append(domains, prefix+"."+it.zone)
 		}
 		result = append(result, MappingInfo{
-			DomainPrefixes: append([]string(nil), it.mp.DomainPrefixes...), Domains: domains, UpstreamScheme: it.mp.UpstreamScheme,
+			DomainZone: it.zone, DomainPrefixes: append([]string(nil), it.mp.DomainPrefixes...), Domains: domains, UpstreamScheme: it.mp.UpstreamScheme,
 			ExpiresAt: it.mp.ExpiresAt, InvalidReason: reason,
 			Health: health, ConsecutiveFailures: it.st.Failures, CheckedAt: it.st.CheckedAt,
 			Description:    it.mp.Description,
@@ -849,6 +853,7 @@ func (m *Manager) ListMappings() []MappingInfo {
 
 type MappingInfo struct {
 	DesiredRunning      bool     `json:"desired_running"`
+	DomainZone          string   `json:"domain_zone,omitempty"`
 	DomainPrefixes      []string `json:"domain_prefixes,omitempty"`
 	Domains             []string `json:"domains,omitempty"`
 	UpstreamScheme      string   `json:"upstream_scheme,omitempty"`
@@ -967,7 +972,7 @@ func (m *Manager) RemoteSummaries() []map[string]any {
 	defer m.mu.Unlock()
 	result := make([]map[string]any, 0, len(m.cfg.Remotes))
 	for _, r := range m.cfg.Remotes {
-		result = append(result, map[string]any{"name": r.Name, "host": r.Host, "port": r.Port, "user": r.User, "domain_zone": domainZone(remoteFor(m.cfg, r.Name))})
+		result = append(result, map[string]any{"name": r.Name, "host": r.Host, "port": r.Port, "user": r.User, "domain_zone": domainZone(remoteFor(m.cfg, r.Name)), "domain_zones": remoteZones(remoteFor(m.cfg, r.Name))})
 	}
 	return result
 }

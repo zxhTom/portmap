@@ -3,6 +3,7 @@ package relayprotocol
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 const DefaultZone = "port.toms.chat"
@@ -21,29 +22,36 @@ func ValidateZone(zone string) (string, error) {
 }
 
 type Request struct {
-	ClientID    string          `json:"client_id,omitempty"`
-	ClientName  string          `json:"client_name,omitempty"`
-	Mappings    []MappingReport `json:"mappings,omitempty"`
-	LeaseID     string          `json:"lease_id,omitempty"`
-	Operation   string          `json:"operation"`
-	Owner       string          `json:"owner"`
-	Prefixes    []string        `json:"prefixes,omitempty"`
-	Port        int             `json:"port,omitempty"`
-	Scheme      string          `json:"scheme,omitempty"`
-	Fingerprint string          `json:"fingerprint,omitempty"`
-	Zone        string          `json:"zone,omitempty"`
+	RecoveryResults []RecoveryResult `json:"recovery_results,omitempty"`
+	Zones           []string         `json:"zones,omitempty"`
+	ClientID        string           `json:"client_id,omitempty"`
+	ClientName      string           `json:"client_name,omitempty"`
+	Mappings        []MappingReport  `json:"mappings,omitempty"`
+	LeaseID         string           `json:"lease_id,omitempty"`
+	Operation       string           `json:"operation"`
+	Owner           string           `json:"owner"`
+	Prefixes        []string         `json:"prefixes,omitempty"`
+	Port            int              `json:"port,omitempty"`
+	Scheme          string           `json:"scheme,omitempty"`
+	Fingerprint     string           `json:"fingerprint,omitempty"`
+	Zone            string           `json:"zone,omitempty"`
 }
 type Response struct {
-	Zone           string   `json:"zone,omitempty"`
-	Domains        []string `json:"domains,omitempty"`
-	Error          string   `json:"error,omitempty"`
-	Disabled       bool     `json:"disabled,omitempty"`
-	DisabledOwners []string `json:"disabled_owners,omitempty"`
+	RecoveryCommands []RecoveryCommand `json:"recovery_commands,omitempty"`
+	Zones            []string          `json:"zones,omitempty"`
+	Zone             string            `json:"zone,omitempty"`
+	Domains          []string          `json:"domains,omitempty"`
+	Error            string            `json:"error,omitempty"`
+	Disabled         bool              `json:"disabled,omitempty"`
+	DisabledOwners   []string          `json:"disabled_owners,omitempty"`
 }
 
 // MappingReport is a client-reported view of one remote mapping. It contains
 // no SSH credentials and is scoped to the VPS receiving the snapshot.
 type MappingReport struct {
+	Health         string   `json:"health,omitempty"`
+	Invalid        bool     `json:"invalid,omitempty"`
+	ExpiresAt      string   `json:"expires_at,omitempty"`
 	Owner          string   `json:"owner"`
 	Group          string   `json:"group"`
 	Name           string   `json:"name"`
@@ -80,4 +88,43 @@ func Normalize(prefixes []string) ([]string, error) {
 		out = append(out, p)
 	}
 	return out, nil
+}
+
+func NormalizeZones(zones []string, primary string) ([]string, string, error) {
+	primary, err := ValidateZone(primary)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(zones) == 0 {
+		zones = []string{primary}
+	}
+	out := make([]string, 0, len(zones))
+	seen := map[string]bool{}
+	for _, value := range zones {
+		zone, err := ValidateZone(value)
+		if err != nil {
+			return nil, "", err
+		}
+		if seen[zone] {
+			return nil, "", fmt.Errorf("域名后缀重复：%s", zone)
+		}
+		seen[zone] = true
+		out = append(out, zone)
+	}
+	if !seen[primary] {
+		return nil, "", fmt.Errorf("主后缀必须属于此 VPS 的后缀列表")
+	}
+	return out, primary, nil
+}
+
+type RecoveryCommand struct {
+	ID        string    `json:"id"`
+	Owner     string    `json:"owner"`
+	ExpiresAt time.Time `json:"expires_at"`
+}
+type RecoveryResult struct {
+	ID      string `json:"id"`
+	Owner   string `json:"owner"`
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }

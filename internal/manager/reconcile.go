@@ -114,7 +114,12 @@ func validateConfig(c *config.Config) error {
 		}
 	}
 	remotes := make(map[string]bool)
-	for _, r := range c.Remotes {
+	for i := range c.Remotes {
+		r := c.Remotes[i]
+		if err := normalizeRemoteZones(&r); err != nil {
+			return err
+		}
+		c.Remotes[i] = r
 		if r.Name == "" || r.Host == "" || r.Port < 0 || r.Port > 65535 || remotes[r.Name] {
 			return fmt.Errorf("invalid or duplicate remote")
 		}
@@ -149,8 +154,14 @@ func validateConfig(c *config.Config) error {
 			}
 			if len(mp.DomainPrefixes) > 0 {
 				r := remoteFor(*c, mp.Remote)
+				if mp.DomainZone != "" {
+					copy := *mp
+					if err := selectMappingZone(r, &copy); err != nil {
+						return err
+					}
+				}
 				for _, prefix := range mp.DomainPrefixes {
-					host := prefix + "." + domainZone(r)
+					host := prefix + "." + mappingZone(r, *mp)
 					identity := relayIdentity(r) + "/" + host
 					if owner := domains[identity]; owner != "" {
 						return fmt.Errorf("域名 %s 被 %s 和 %s 重复绑定", host, owner, key.String())
@@ -216,11 +227,13 @@ func (m *Manager) reload() error {
 	changed := make(map[mappingKey]*entry)
 	for key, e := range m.entries {
 		mp, exists := wanted[key]
-		dependenciesChanged := (e.Mapping.EffectiveType() == config.TypeSSH || (e.Mapping.EffectiveType() == config.TypeMultipass && e.Mapping.Remote != "")) && remoteFor(previous, e.Mapping.Remote) != remoteFor(next, mp.Remote)
+		dependenciesChanged := (e.Mapping.EffectiveType() == config.TypeSSH || (e.Mapping.EffectiveType() == config.TypeMultipass && e.Mapping.Remote != "")) && !reflect.DeepEqual(transportRemote(remoteFor(previous, e.Mapping.Remote), e.Mapping), transportRemote(remoteFor(next, mp.Remote), mp))
 		if e.Mapping.EffectiveType() == config.TypeDocker && previous.Docker != next.Docker {
 			dependenciesChanged = true
 		}
 		oldTransport, newTransport := e.Mapping, mp
+		oldTransport.DomainZone = mappingZone(remoteFor(previous, e.Mapping.Remote), e.Mapping)
+		newTransport.DomainZone = mappingZone(remoteFor(next, mp.Remote), mp)
 		oldTransport.Description = ""
 		oldTransport.ExpiresAt = ""
 		newTransport.ExpiresAt = ""
@@ -261,6 +274,7 @@ func (m *Manager) reload() error {
 		if _, exists := m.entries[key]; !exists {
 			m.entries[key] = &entry{Mapping: mp, Group: key.Group}
 		} else {
+			m.entries[key].Mapping.DomainZone = mp.DomainZone
 			m.entries[key].Mapping.Description = mp.Description
 			m.entries[key].Mapping.ExpiresAt = mp.ExpiresAt
 		}

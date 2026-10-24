@@ -70,6 +70,10 @@ func (m *Manager) CreateMapping(group string, mp config.Mapping) (config.Mapping
 			return mp, err
 		}
 	}
+	if err := selectMappingZone(remote, &mp); err != nil {
+		m.mu.Unlock()
+		return mp, err
+	}
 	reserved := make(map[int]string)
 	if mp.UsesRelay() {
 		for key, e := range m.entries {
