@@ -1,0 +1,7 @@
+[Unit]
+Description=Renew the 1822 Portmap client console certificate
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/home/zxhtom/.local/share/portmap-certbot/bin/certbot renew --quiet --cert-name portmap-client-1822 --deploy-hook "/usr/bin/systemctl reload nginx"

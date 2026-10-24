@@ -6,3 +6,5 @@
 # Local web administrator credentials
 web-auth.json
 web-initial-password
+
+__pycache__/
