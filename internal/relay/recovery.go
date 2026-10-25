@@ -31,37 +31,70 @@ func recoveryEligible(record TunnelRecord, now time.Time) bool {
 	}
 	return true
 }
+func recoveryPermitted(record TunnelRecord, now time.Time, manual bool) bool {
+	if !manual {
+		return recoveryEligible(record, now)
+	}
+	if record.Disabled {
+		return false
+	}
+	if record.ExpiresAt != "" {
+		until, err := time.Parse(time.RFC3339Nano, record.ExpiresAt)
+		if err != nil || !now.Before(until) {
+			return false
+		}
+	}
+	return true
+}
 func (i *Inventory) queueRecovery(owner string, manual bool) error {
 	record, ok := i.records[owner]
 	now := time.Now()
-	if !ok || !recoveryEligible(record, now) {
-		return fmt.Errorf("隧道未启用、已过期、已作废、被禁用或客户端未连接")
+	if !ok {
+		return fmt.Errorf("隧道记录不存在")
 	}
-	state := i.recovery[owner]
-	if state != nil {
-		if state.Status == "pending" && now.Before(state.Command.ExpiresAt) {
+	if !recoveryPermitted(record, now, manual) {
+		return fmt.Errorf("隧道被服务端禁用或已过期，请先启用或续期")
+	}
+	prior := i.recovery[owner]
+	if prior != nil {
+		pending := prior.Status == "pending" && (prior.Command.ExpiresAt.IsZero() || now.Before(prior.Command.ExpiresAt))
+		if pending && (!manual || prior.Command.Action == "start") {
 			return nil
 		}
-		if now.Before(state.Next) {
+		if (!manual || prior.Command.Action == "start") && now.Before(prior.Next) {
 			return fmt.Errorf("恢复请求冷却中")
 		}
-		if !manual && state.Attempts >= 5 {
-			return fmt.Errorf("自动恢复达到5次上限，请排查后手动恢复")
+		if !manual && prior.Attempts >= 5 {
+			return fmt.Errorf("自动恢复达到5次上限，请排查后手动唤醒")
 		}
-	} else {
-		state = &recoveryState{}
-		i.recovery[owner] = state
 	}
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return err
 	}
-	state.Attempts++
+	state := &recoveryState{Attempts: 1, Status: "pending", Message: "等待客户端接收恢复请求"}
+	if prior != nil {
+		state.Attempts = prior.Attempts + 1
+	}
 	state.Command = relayprotocol.RecoveryCommand{ID: hex.EncodeToString(id[:]), Owner: owner, ExpiresAt: now.Add(time.Minute)}
-	delay := time.Duration(1<<min(state.Attempts-1, 4)) * 30 * time.Second
-	state.Next = now.Add(delay)
-	state.Status = "pending"
-	state.Message = "等待客户端接收恢复请求"
+	state.Next = now.Add(time.Duration(1<<min(state.Attempts-1, 4)) * 30 * time.Second)
+	if manual {
+		state.Command.Action = "start"
+		state.Command.ExpiresAt = time.Time{}
+		state.Next = now.Add(30 * time.Second)
+		state.Message = "手动唤醒请求已保存，等待客户端执行"
+	}
+	i.recovery[owner] = state
+	if manual {
+		if err := i.saveManualRecovery(); err != nil {
+			if prior == nil {
+				delete(i.recovery, owner)
+			} else {
+				i.recovery[owner] = prior
+			}
+			return err
+		}
+	}
 	return nil
 }
 func (i *Inventory) RequestRecovery(owner string) error {
@@ -74,21 +107,50 @@ func (i *Inventory) RecoveryCommands(clientID string) []relayprotocol.RecoveryCo
 	defer i.mu.Unlock()
 	now := time.Now()
 	commands := []relayprotocol.RecoveryCommand{}
+	previous := make(map[string]*recoveryState, len(i.recovery))
+	for owner, state := range i.recovery {
+		copy := *state
+		previous[owner] = &copy
+	}
 	for owner, record := range i.records {
-		if record.ClientID != clientID || !recoveryEligible(record, now) {
+		if record.ClientID != clientID {
 			continue
 		}
-		if record.Status != "running" || record.ProbeError != "" {
+		if recoveryEligible(record, now) && (record.Status != "running" || record.ProbeError != "") {
 			i.queueRecovery(owner, false)
 		}
-		if state := i.recovery[owner]; state != nil && state.Status == "pending" {
-			if now.Before(state.Command.ExpiresAt) {
-				commands = append(commands, state.Command)
-			} else {
-				state.Status = "expired"
-				state.Message = "客户端未在有效期内执行"
+		state := i.recovery[owner]
+		if state == nil || state.Status != "pending" {
+			continue
+		}
+		manual := state.Command.Action == "start"
+		if !recoveryPermitted(record, now, manual) {
+			state.Status = "skipped"
+			state.Message = "隧道策略已改变，未执行唤醒"
+			continue
+		}
+		if manual {
+			if now.Sub(record.LastSeen) > 45*time.Second || record.RecoveryProtocol < 2 && !recoveryEligible(record, now) {
+				continue
+			}
+			if state.Command.ExpiresAt.IsZero() {
+				state.Command.ExpiresAt = now.Add(time.Minute)
 			}
 		}
+		if now.Before(state.Command.ExpiresAt) {
+			command := state.Command
+			if manual && record.RecoveryProtocol < 2 {
+				command.Action = ""
+			}
+			commands = append(commands, command)
+		} else {
+			state.Status = "expired"
+			state.Message = "客户端未在执行期限内回执，请重新唤醒"
+		}
+	}
+	if err := i.saveManualRecovery(); err != nil {
+		i.recovery = previous
+		return nil
 	}
 	return commands
 }
@@ -115,7 +177,7 @@ func (i *Inventory) Acknowledge(clientID string, results []relayprotocol.Recover
 		state.Status = result.Status
 		state.Message = result.Message
 	}
-	return nil
+	return i.saveManualRecovery()
 }
 func (i *Inventory) Probe(ctx context.Context) {
 	records := i.List()

@@ -7,6 +7,10 @@ import (
 )
 
 func (m *Manager) processRecovery(remote config.Remote, items []relayprotocol.MappingReport, command relayprotocol.RecoveryCommand) {
+	if command.Action != "" && command.Action != "start" {
+		return
+	}
+	manual := command.Action == "start"
 	if command.ID == "" || len(command.ID) > 100 || !time.Now().Before(command.ExpiresAt) || command.ExpiresAt.After(time.Now().Add(2*time.Minute)) {
 		return
 	}
@@ -35,7 +39,7 @@ func (m *Manager) processRecovery(remote config.Remote, items []relayprotocol.Ma
 	}
 	e := m.entries[key]
 	st := m.state.Mappings[key.String()]
-	eligible := e != nil && !m.shuttingDown && st.Running && !st.Invalid && !e.Mapping.Expired(time.Now()) && !m.serverDisabled[command.Owner] && relayIdentity(remoteFor(m.cfg, e.Mapping.Remote)) == identity
+	eligible := e != nil && !m.shuttingDown && (manual || st.Running && !st.Invalid) && !e.Mapping.Expired(time.Now()) && !m.serverDisabled[command.Owner] && relayIdentity(remoteFor(m.cfg, e.Mapping.Remote)) == identity
 	m.mu.Unlock()
 	result := relayprotocol.RecoveryResult{ID: command.ID, Owner: command.Owner, Status: "skipped", Message: "本地启停意图、有效期或禁用策略不允许恢复"}
 	if eligible {
@@ -58,7 +62,7 @@ func (m *Manager) processRecovery(remote config.Remote, items []relayprotocol.Ma
 		}
 		e.startMu.Unlock()
 		if err == nil {
-			err = m.startEntry(key, e, true)
+			err = m.startEntry(key, e, !manual)
 		}
 		if err != nil {
 			result.Status = "failed"

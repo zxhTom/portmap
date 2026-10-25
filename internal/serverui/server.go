@@ -257,7 +257,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 				fail(w, 400, err.Error())
 				return
 			}
-			respond(w, 202, map[string]string{"message": "等待客户端接收恢复请求"})
+			respond(w, 202, map[string]string{"message": "手动唤醒请求已保存。客户端已连接则执行启动，断联时等待重新连接；旧版客户端需先升级。"})
 			return
 		}
 		var disabled bool

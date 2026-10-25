@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/zxhtom/portmap/internal/config"
@@ -88,7 +89,12 @@ func (m *Manager) SyncServers() {
 			}
 		}
 		m.mu.Unlock()
-		response, err := requester(b.remote, relayprotocol.Request{RecoveryResults: results, Operation: "tunnel_snapshot", ClientID: clientID, ClientName: clientName, Mappings: b.items})
+		snapshot := relayprotocol.Request{RecoveryProtocol: 2, RecoveryResults: results, Operation: "tunnel_snapshot", ClientID: clientID, ClientName: clientName, Mappings: b.items}
+		response, err := requester(b.remote, snapshot)
+		if err != nil && (err.Error() == "invalid request" || strings.Contains(err.Error(), `unknown field "recovery_protocol"`)) {
+			snapshot.RecoveryProtocol = 0
+			response, err = requester(b.remote, snapshot)
+		}
 		if err != nil {
 			continue
 		} // Plain SSH VPS or an older relay remains usable.

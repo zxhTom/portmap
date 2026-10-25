@@ -133,7 +133,7 @@ func (s *Server) Apply(req relayprotocol.Request) (relayprotocol.Response, error
 	}
 	if req.Operation == "tunnel_snapshot" {
 		var err error
-		response.DisabledOwners, err = s.inventory.Snapshot(req.ClientID, req.ClientName, req.Mappings)
+		response.DisabledOwners, err = s.inventory.Snapshot(req.ClientID, req.ClientName, req.Mappings, req.RecoveryProtocol)
 		if err == nil {
 			err = s.inventory.Acknowledge(req.ClientID, req.RecoveryResults)
 		}

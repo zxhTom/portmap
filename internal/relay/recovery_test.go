@@ -37,8 +37,11 @@ func TestRecoveryCommandsScopedAcknowledgedAndBounded(t *testing.T) {
 	if len(i.RecoveryCommands(client)) != 0 {
 		t.Fatal("replayed completed command")
 	}
-	if err := i.RequestRecovery(mp.Owner); err == nil {
-		t.Fatal("ignored retry cooldown")
+	if err := i.queueRecovery(mp.Owner, false); err == nil {
+		t.Fatal("ignored automatic retry cooldown")
+	}
+	if err := i.RequestRecovery(mp.Owner); err != nil {
+		t.Fatal("explicit manual wake blocked by automatic backoff")
 	}
 }
 func TestRecoveryDoesNotStartStoppedExpiredOrDisabled(t *testing.T) {
@@ -62,9 +65,14 @@ func TestRecoveryDoesNotStartStoppedExpiredOrDisabled(t *testing.T) {
 			if len(i.RecoveryCommands(client)) != 0 {
 				t.Fatal("ineligible mapping auto-started")
 			}
-			if err := i.RequestRecovery(mp.Owner); err == nil {
-				t.Fatal("ineligible mapping manually queued")
+			err := i.RequestRecovery(mp.Owner)
+			if (mode == "disabled" || mode == "expired") && err == nil {
+				t.Fatal("policy restriction manually bypassed")
 			}
+			if (mode == "invalid" || mode == "stopped") && err != nil {
+				t.Fatal("explicit manual wake rejected")
+			}
+
 		})
 	}
 }

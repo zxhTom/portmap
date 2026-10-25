@@ -26,6 +26,8 @@ type Inventory struct {
 }
 
 type TunnelRecord struct {
+	RecoveryProtocol int       `json:"recovery_protocol,omitempty"`
+	ClientOnline     bool      `json:"client_online"`
 	ProbeError       string    `json:"probe_error,omitempty"`
 	ProbedAt         time.Time `json:"probed_at"`
 	RecoveryStatus   string    `json:"recovery_status,omitempty"`
@@ -60,6 +62,9 @@ func NewInventory(dir string) (*Inventory, error) {
 		if !validHexID(owner, 32) {
 			return nil, fmt.Errorf("invalid disabled tunnel identity")
 		}
+	}
+	if err := i.loadManualRecovery(); err != nil {
+		return nil, err
 	}
 	return i, nil
 }
@@ -132,9 +137,13 @@ func (i *Inventory) Check(owner string) (bool, error) {
 	return i.disabled[owner], nil
 }
 
-func (i *Inventory) Snapshot(clientID, clientName string, mappings []relayprotocol.MappingReport) ([]string, error) {
+func (i *Inventory) Snapshot(clientID, clientName string, mappings []relayprotocol.MappingReport, protocols ...int) ([]string, error) {
 	if !validHexID(clientID, 8) || len(clientName) > 255 || len(mappings) > 1000 {
 		return nil, fmt.Errorf("invalid snapshot")
+	}
+	protocol := 0
+	if len(protocols) > 0 {
+		protocol = protocols[0]
 	}
 	next := make(map[string]TunnelRecord, len(mappings))
 	now := time.Now()
@@ -149,7 +158,7 @@ func (i *Inventory) Snapshot(clientID, clientName string, mappings []relayprotoc
 		if _, exists := next[mp.Owner]; exists {
 			return nil, fmt.Errorf("duplicate mapping identity")
 		}
-		next[mp.Owner] = TunnelRecord{MappingReport: mp, ClientID: clientID, ClientName: clientName, LastSeen: now}
+		next[mp.Owner] = TunnelRecord{RecoveryProtocol: protocol, MappingReport: mp, ClientID: clientID, ClientName: clientName, LastSeen: now}
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -180,15 +189,19 @@ func (i *Inventory) Snapshot(clientID, clientName string, mappings []relayprotoc
 		record.Disabled = i.disabled[owner]
 		record.Online = record.Status == "running" && !record.Disabled
 		i.records[owner] = record
-		if state := i.recovery[owner]; state != nil && state.Status == "pending" && !recoveryEligible(record, now) {
+		if state := i.recovery[owner]; state != nil && state.Status == "pending" && !recoveryPermitted(record, now, state.Command.Action == "start") {
 			state.Status = "skipped"
 			state.Message = "当前启停意图或策略不允许恢复"
+			state.Next = time.Time{}
 		}
 		if record.Disabled {
 			disabled = append(disabled, owner)
 		}
 	}
 	sort.Strings(disabled)
+	if err := i.saveManualRecovery(); err != nil {
+		return nil, err
+	}
 	return disabled, nil
 }
 
@@ -197,11 +210,21 @@ func (i *Inventory) List() []TunnelRecord {
 	defer i.mu.RUnlock()
 	result := make([]TunnelRecord, 0, len(i.records))
 	for _, record := range i.records {
-		record.Online = record.Online && time.Since(record.LastSeen) < 45*time.Second && !record.Disabled && record.ProbeError == ""
+		record.ClientOnline = time.Since(record.LastSeen) < 45*time.Second
+		record.Online = record.Online && record.ClientOnline && !record.Disabled && record.ProbeError == ""
 		if state := i.recovery[record.Owner]; state != nil {
 			record.RecoveryStatus = state.Status
 			record.RecoveryMessage = state.Message
 			record.RecoveryAttempts = state.Attempts
+			if state.Status == "pending" && state.Command.Action == "start" {
+				if !record.ClientOnline {
+					record.RecoveryStatus = "waiting_client"
+					record.RecoveryMessage = "请求已保存，等待客户端控制通道连接"
+				} else if record.RecoveryProtocol < 2 && !recoveryEligible(record, time.Now()) {
+					record.RecoveryStatus = "waiting_upgrade"
+					record.RecoveryMessage = "请求已保存，需升级客户端以支持手动唤醒"
+				}
+			}
 		}
 		result = append(result, record)
 	}

@@ -22,19 +22,20 @@ func ValidateZone(zone string) (string, error) {
 }
 
 type Request struct {
-	RecoveryResults []RecoveryResult `json:"recovery_results,omitempty"`
-	Zones           []string         `json:"zones,omitempty"`
-	ClientID        string           `json:"client_id,omitempty"`
-	ClientName      string           `json:"client_name,omitempty"`
-	Mappings        []MappingReport  `json:"mappings,omitempty"`
-	LeaseID         string           `json:"lease_id,omitempty"`
-	Operation       string           `json:"operation"`
-	Owner           string           `json:"owner"`
-	Prefixes        []string         `json:"prefixes,omitempty"`
-	Port            int              `json:"port,omitempty"`
-	Scheme          string           `json:"scheme,omitempty"`
-	Fingerprint     string           `json:"fingerprint,omitempty"`
-	Zone            string           `json:"zone,omitempty"`
+	RecoveryProtocol int              `json:"recovery_protocol,omitempty"`
+	RecoveryResults  []RecoveryResult `json:"recovery_results,omitempty"`
+	Zones            []string         `json:"zones,omitempty"`
+	ClientID         string           `json:"client_id,omitempty"`
+	ClientName       string           `json:"client_name,omitempty"`
+	Mappings         []MappingReport  `json:"mappings,omitempty"`
+	LeaseID          string           `json:"lease_id,omitempty"`
+	Operation        string           `json:"operation"`
+	Owner            string           `json:"owner"`
+	Prefixes         []string         `json:"prefixes,omitempty"`
+	Port             int              `json:"port,omitempty"`
+	Scheme           string           `json:"scheme,omitempty"`
+	Fingerprint      string           `json:"fingerprint,omitempty"`
+	Zone             string           `json:"zone,omitempty"`
 }
 type Response struct {
 	RecoveryCommands []RecoveryCommand `json:"recovery_commands,omitempty"`
@@ -118,6 +119,7 @@ func NormalizeZones(zones []string, primary string) ([]string, string, error) {
 }
 
 type RecoveryCommand struct {
+	Action    string    `json:"action,omitempty"`
 	ID        string    `json:"id"`
 	Owner     string    `json:"owner"`
 	ExpiresAt time.Time `json:"expires_at"`
